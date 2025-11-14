@@ -1,0 +1,67 @@
+video:
+  chunk_size_seconds: 5.0
+  frames_per_chunk: 5
+  fps_target: null
+
+vlm:
+  endpoint: "http://localhost:8078/v1"
+  api_key: ""
+  model_name: "qwen-vlm"
+  temperature: 0.2
+  top_p: 0.9
+  max_tokens: 2048
+  system_prompt: "You are a helpful assistant that describes video content in detail."
+  user_prompt_template: "Describe what's happening in these frames from a video."
+
+llm_injector:
+  endpoint: "http://localhost:8078/v1"
+  api_key: ""
+  model_name: "qwen-vlm"
+  temperature: 0.2
+  top_p: 0.9
+  max_tokens: 8192
+
+chunking:
+  enabled: true
+  chunk_size: 320
+  chunk_overlap: 64
+  max_triplets_per_chunk: 6
+  use_sentence_boundaries: true
+  parallel_count: 4
+  enable_global_refinement: true
+  refinement_max_tokens: 2000
+  global_triplet_limit: 25
+
+kg:
+  batch_size: 3
+  verbose: false
+  embedding_endpoint: "http://localhost:8071/v1"
+  embedding_model: "qwen-embedding"
+  embedding_api_key: ""
+
+neo4j:
+  uri: "bolt://localhost:7687"
+  user: "neo4j"
+  password: "password"
+  database: "neo4j"
+
+retrieval:
+  use_reranker: true
+  reranker_endpoint: "http://localhost:8070/v1/rerank"
+  reranker_api_key: ""
+  reranker_model: "qwen-reranker"
+  top_k: 5
+  top_k_chunks: 8
+  top_k_entities: 5
+  graph_hops: 2
+  post_compression: true
+  compression_threshold: 0.15
+  verbose: false
+
+benchmark_llm:
+  endpoint: "http://localhost:8078/v1"
+  api_key: ""
+  model_name: "qwen-vlm"
+  temperature: 0.2
+  top_p: 0.9
+  max_tokens: 2048

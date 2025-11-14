@@ -1,0 +1,9 @@
+uv.lock
+data/samples/test_video.mp4
+logs/*
+.venv
+metrics/*
+src/components/__pycache__/
+src/pipeline/__pycache__/
+src/core/__pycache__/
+src/cli/__pycache__/

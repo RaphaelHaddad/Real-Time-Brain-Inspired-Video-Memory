@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=45", "wheel", "setuptools_scm[toml]>=6.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vidgraph"
+version = "0.1.0"
+description = "Video-to-Knowledge Graph Pipeline"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [
+    {name = "VidGraph Team", email = "team@vidgraph.com"}
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "pydantic>=1.10.0",
+    "httpx>=0.24.0",
+    "opencv-python>=4.8.0",
+    "numpy>=1.21.0",
+    "tqdm>=4.65.0",
+    "langchain>=0.0.300",
+    "langchain-openai>=0.0.5",
+    "langchain-experimental>=0.0.0",
+    "langchain-text-splitters>=0.0.0",
+    "neo4j>=5.0.0",
+    "pyyaml>=6.0",
+    "torch>=1.13.0",
+    "nltk>=3.8.0",
+    "rapidfuzz>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "black>=22.0",
+    "flake8>=4.0",
+    "mypy>=0.950"
+]
+
+[project.scripts]
+vidgraph = "src.cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["vidgraph*"]

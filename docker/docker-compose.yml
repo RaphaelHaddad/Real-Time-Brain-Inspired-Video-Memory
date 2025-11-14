@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  neo4j:
+    image: neo4j:5-community
+    container_name: vidgraph-neo4j
+    ports:
+      - "7687:7687"  # Bolt port
+      - "7474:7474"  # HTTP port
+    environment:
+      - NEO4J_AUTH=neo4j/password  # Default user/initial password
+      - NEO4J_dbms_security_auth__minimum__password__length=8
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+      - neo4j_import:/import
+      - neo4j_plugins:/plugins
+      - ./docker/neo4j_init.cypher:/docker-entrypoint-initdb.d/init.cypher
+    healthcheck:
+      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "password", "RETURN 1;"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+volumes:
+  neo4j_data:
+  neo4j_logs:
+  neo4j_import:
+  neo4j_plugins:

@@ -1,0 +1,445 @@
+# Brain-inspired Graph-RAG for real time video
+
+![Banner](data/images/banner.png)
+
+## System Requirements
+
+Before installing VidGraph, ensure your system has the following:
+
+- **Python**: Version 3.9 or higher
+- **Docker**: For Neo4j database container
+- **uv**: Modern Python package installer and virtual environment manager
+
+## Features
+
+- **Video Analysis**: Extract meaningful content from videos using Vision Language Models (VLM)
+- **Knowledge Graph Construction**: Build semantic knowledge graphs from video analysis results
+- **Real-time Processing**: Process videos in chunks for efficient memory usage
+- **Flexible Retrieval**: Both online (during processing) and offline (post-processing) query capabilities
+- **Collaboration Support**: Export/import functionality for sharing graphs between team members
+- **Cross-Platform**: Runs on Mac, Linux, and Windows with WSL support
+- **Hardware Acceleration**: Optimized for available hardware (CUDA, MPS, CPU)
+
+## Architecture
+
+This project is built as a modular pipeline that cleanly separates media ingestion, language modeling, graph storage, and retrieval. Each component can be tuned independently (e.g., swapping LLM models or updating retrieval logic) without touching the rest of the system.
+
+<details>
+<summary><strong>📋 Component Responsibilities (click to expand)</strong></summary>
+
+| Component | Responsibility |
+| --- | --- |
+| **VLM Extractor** | Chunks the video, pairs frames with captions, and calls vision-language models to summarize content without overloading the LLM token budget. |
+| **Knowledge Graph Builder** | Central orchestrator that ingests VLM output, enriches it using the injector, persists to Neo4j, and exposes both retrieval and export hooks. |
+| **LLM Injector** | Lightweight helper prompts that run before and during graph construction to normalize entity names, deduplicate relations, and surface missing context for downstream enrichment. |
+| **ACS Automata** | Network science utility that tracks graph statistics (centrality, clustering, path metrics) and feeds them back into the builder for smarter linking. |
+| **Neo4j Handler** | Manages UUID-isolated graph sessions, connection pooling, and transactional safety when writing nodes, relationships, and metrics. |
+| **Retriever** | Supports both online (during video processing) and offline (post-processing) query flows with consistent response formatting. |
+
+</details>
+
+The architecture encourages experimentation: swap the VLM backend, adjust the injector prompts in `src/components/prompts.py`, or plug in a new benchmarking flow without rewriting the storage layer.
+
+## Installation
+
+1. Clone the repository:
+   ```bash
+   git clone <repository-url>
+   cd vidgraph
+   ```
+
+2. Install dependencies using uv:
+   ```bash
+   uv venv
+   source .venv/bin/activate
+   uv pip install -r requirements.txt
+   ```
+
+## Configuration
+
+<details>
+<summary><strong>⚙️ Configuration options (click to expand)</strong></summary>
+
+The system uses YAML configuration files. A sample configuration is provided in `config/base_config.yaml`.
+
+Key configuration options include:
+- Video processing parameters (chunk size, frames per chunk)
+- VLM settings (endpoint, model, API key, parameters)
+- LLM injector settings (separate from VLM for flexibility)
+- Knowledge graph parameters (batch size, RAG options)
+- **Neo4j connection settings** (use `bolt://localhost:7687` or `neo4j://localhost:7687`)
+- Retrieval parameters
+
+</details>
+
+## Pipeline Overview
+
+```mermaid
+flowchart LR
+  Video(["Video"])
+  Video -->|video| VLM["VLM Extraction"]
+  VLM -->|vlm_output.json| VLMOut(["VLM Output\nvlm_output.json"])
+  VLMOut --> GraphBuilder["Graph Builder"]
+  subgraph Enhancers["Injector & Metrics"]
+    LLMInjector["LLM Injector"]
+    ACSAutomata["ACS Automata"]
+  end
+  LLMInjector --> GraphBuilder
+  ACSAutomata --> GraphBuilder
+  GraphBuilder -->|retrieval_results| RetrievalResults["Retrieval Results"]
+  GraphBuilder -->|exportable graph| ExportGraph["Exportable Graph"]
+  RetrievalResults --> Benchmark["Benchmark Evaluation"]
+  Benchmark --> Leaderboard["Leaderboard\n1. MVP – 13% accuracy\n(Placeholder entries for future results)"]
+```
+
+Left column (first entry) shows the current MVP run with **13% accuracy**; more placements will be added here after future improvements.
+
+## Usage
+
+### 1. Run VLM Extraction (Before starting Neo4j)
+
+Extract content from a video file first:
+
+```bash
+python3 -m src.cli.main graph --config config/base_config.yaml --video path/to/video.mp4 --output output/graph_output.json
+```
+
+### 2. Start Neo4j Database
+
+Start the Neo4j database using Docker:
+
+```bash
+cd docker
+docker compose up -d
+```
+
+### 3. Build Knowledge Graph
+
+Construct a knowledge graph from the VLM output:
+
+```bash
+python3 -m src.cli.main kg --config config/base_config.yaml --vlm-output output/vlm_output.json
+```
+
+To include online retrieval during processing, specify a retrieval schedule:
+
+```bash
+python3 -m src.cli.main kg --config config/base_config.yaml --vlm-output output/vlm_output.json --retrieval-schedule path/to/schedule.json
+```
+
+<details>
+<summary><strong>🐛 Debugging (click to expand)</strong></summary>
+
+For detailed logging and debugging information, set the `VIDGRAPH_LOG_LEVEL` environment variable:
+
+```bash
+VIDGRAPH_LOG_LEVEL=DEBUG python3 -m src.cli.main kg --config config/base_config.yaml --vlm-output output/vlm_output.json
+```
+
+Available log levels: `DEBUG`, `INFO`, `WARNING`, `ERROR`. Debug logs include detailed pipeline execution traces, LLM prompts/responses, and performance metrics. Logs are automatically saved to the `logs/` directory with per-batch trace files.
+
+</details>
+
+### 4. Export Graph for Collaboration
+
+Export a knowledge graph to share with collaborators:
+
+```bash
+python3 -m src.cli.main export --config config/base_config.yaml --graph-uuid <graph-uuid> --output exported_graph.json
+```
+
+This creates a JSON file containing all nodes and relationships for the specified graph UUID that can be easily shared.
+
+### 5. Import Graph from Collaborator
+
+Import a knowledge graph from an exported file:
+
+```bash
+python3 -m src.cli.main import --config config/base_config.yaml --input exported_graph.json
+```
+
+To import with a specific UUID:
+```bash
+python3 -m src.cli.main import --config config/base_config.yaml --input exported_graph.json --new-uuid <your-desired-uuid>
+```
+
+### 6. Run Benchmark Evaluation
+
+Evaluate retrieval quality using LLM-based benchmarking:
+
+```bash
+python3 -m src.cli.main benchmark --config config/base_config.yaml --input retrieval_results.json --output benchmark_results.json
+```
+
+The benchmark pipeline:
+1. **Generates answers** using the LLM with retrieved context
+2. **Evaluates correctness** against ground truth answers
+3. **Reports accuracy** and detailed results
+
+See [BENCHMARK_GUIDE.md](BENCHMARK_GUIDE.md) for detailed documentation.
+
+## Pre-injection vs Injection
+
+<details>
+<summary><strong>🔄 Pre-injection vs Injection Details (click to expand)</strong></summary>
+
+The KG construction pipeline runs in two LLM-assisted phases when hierarchical
+extraction is enabled:
+
+- **Pre-injection (pre-extraction)**: the VLM output is split into small, token-aware
+  chunks. A lightweight LLM prompt runs on each chunk to extract compact
+  candidate triplets (head, relation, tail). These are deduplicated locally and
+  optionally passed through a fast global refiner to merge near-duplicates.
+- **Injection (final enrichment)**: the aggregated candidate triplets (not the raw
+  VLM text) are sent to a final LLM prompt which consolidates, normalizes, and
+  enriches the triplets before they are written to Neo4j.
+
+This two-step approach keeps the final prompt small (avoiding token overflow),
+speeds up extraction by parallelizing chunk-level calls, and gives you a clear
+audit trail of how triplets were produced.
+
+Prompts used by both stages live in `src/components/prompts.py` so you can
+edit them in one place. The file exposes builders that preserve the placeholder
+variables the code relies on (for example: `{input}`, `{max_triplets}`,
+`{pre_extracted_triplets}`, `{network_info}`).
+
+</details>
+
+<details>
+<summary><strong>🔎 7. View Graph in Neo4j Browser (click to expand)</strong></summary>
+
+![Graph Visualization](data/images/graph.png)
+
+After building your knowledge graph, you can visualize and explore it using Neo4j's web interface. Expand this section for step-by-step Cypher queries and tips.
+
+1. **Access Neo4j Browser**:
+  ```bash
+  # Open Neo4j Browser in your web browser
+  open http://localhost:7474
+  # Default credentials: neo4j / password
+  # Connection URL in config: bolt://localhost:7687 or neo4j://localhost:7687
+  ```
+
+2. **Query Your Graph by UUID**:
+  ```cypher
+  // Replace 'your-uuid-here' with your actual graph UUID
+  MATCH (n)-[r]-(m)
+  WHERE n.graph_uuid = 'your-uuid-here'
+  RETURN n, r, m
+  LIMIT 100
+  ```
+
+3. **Explore Graph Structure**:
+  ```cypher
+  // View all nodes in your graph
+  MATCH (n) WHERE n.graph_uuid = 'your-uuid-here'
+  RETURN labels(n), count(n) as count
+  ORDER BY count DESC
+
+  // View relationships
+  MATCH (n)-[r]->(m)
+  WHERE n.graph_uuid = 'your-uuid-here'
+  RETURN type(r), count(r) as count
+  ORDER BY count DESC
+  ```
+
+4. **Find Specific Entities**:
+  ```cypher
+  // Search for entities containing specific text
+  MATCH (n) WHERE n.graph_uuid = 'your-uuid-here'
+  AND n.name CONTAINS 'gloves'
+  RETURN n
+  ```
+
+5. **Explore Chunk-to-Entity Connections**:
+  ```cypher
+  // View how entities connect to source chunks
+  MATCH (e:Entity)-[:FROM_CHUNK]->(c:Chunk)
+  WHERE e.graph_uuid = 'your-uuid-here'
+  RETURN e.name, c.content, c.time
+  LIMIT 20
+  ```
+
+**Tips**:
+- Use the graph visualization panel to see node-link diagrams
+- Click nodes/relationships to see their properties
+- Use `:style` command to customize visualization colors
+- Export visualizations as PNG/SVG for documentation
+
+</details>
+
+### 8. Run Single Offline Retrieval
+
+Query a specific knowledge graph:
+
+```bash
+python3 -m src.cli.main retrieve --config config/base_config.yaml --graph-uuid <graph-uuid> --query "Your query here" --groundtruth "Expected answer for evaluation (optional)"
+```
+
+## Configuration Files
+
+<details>
+<summary><strong>📋 Configuration Files</strong></summary>
+
+- `config/base_config.yaml`: Main configuration file with all system settings
+- `config/vlm_config.yaml`: VLM-specific configuration (optional)
+- `config/kg_config.yaml`: Knowledge graph-specific configuration (optional)
+
+</details>
+
+## Project Structure
+
+<details>
+<summary><strong>📁 Project Structure</strong></summary>
+
+```
+vidgraph/
+├── config/                 # Configuration files
+├── src/                    # Source code
+│   ├── core/              # Core utilities (config, logging, metrics, platform)
+│   ├── pipeline/          # Pipeline components (VLM extractor, KG builder, etc.)
+│   ├── components/        # Reusable components (LLM injector, Neo4j handler, etc.)
+│   ├── utils/             # Utility functions (video processing, embeddings, etc.)
+│   └── cli/               # Command-line interface
+├── docker/                # Docker configuration for Neo4j
+├── data/                  # Input/output data
+├── tests/                 # Test files
+├── requirements.txt       # Python dependencies
+└── pyproject.toml         # Package configuration
+```
+
+</details>
+
+## Retrieval Input Format
+
+<details>
+<summary><strong>📝 Retrieval Input Format</strong></summary>
+
+### Online Retrieval Format
+
+For online retrieval during processing, create a JSON file with the following structure:
+
+```json
+[
+  {
+    "time": "00:10",
+    "query": "What objects are visible at this time?",
+    "groundtruth": "Expected answer for evaluation"
+  },
+  {
+    "time": "00:25", 
+    "query": "What action is taking place?",
+    "groundtruth": "Expected answer for evaluation"
+  }
+]
+```
+
+### Offline Retrieval Format
+
+For offline retrieval, use a JSON file with the following structure:
+
+```json
+[
+  {
+    "query": "What objects are visible in the video?",
+    "groundtruth": "Expected answer for evaluation"
+  },
+  {
+    "query": "What action is taking place?",
+    "groundtruth": "Expected answer for evaluation"
+  }
+]
+```
+
+</details>
+
+## Offline Batch Retrieval
+
+Run batch retrieval from a JSON input file:
+
+```bash
+python3 -m src.cli.main batch-retrieve --config config/base_config.yaml --graph-uuid <graph-uuid> --input input_queries.json --output results.json
+```
+
+The output will be a JSON file with the following consistent format:
+
+```json
+[
+  {
+    "query": "What objects are visible in the video?",
+    "groundtruth": "Expected answer for evaluation",
+    "retrieval": "Retrieved answer from knowledge graph",
+    "graph_uuid": "<graph-uuid>",
+    "retrieval_time": 0.123456,
+    "verbose": false
+  }
+]
+```
+
+## Metrics and Monitoring
+
+<details>
+<summary><strong>📊 Metrics and Monitoring</strong></summary>
+
+The system tracks comprehensive metrics including:
+- Processing times for each pipeline stage
+- API call latencies
+- Graph construction statistics
+- Network science metrics (via ACS Automata)
+
+Metrics are saved to `metrics/` directory in JSON format.
+
+</details>
+
+## Development
+
+<details>
+<summary><strong>🔧 Development</strong></summary>
+
+To run tests:
+
+```bash
+uv run python3 -m pytest tests/
+```
+
+To format code:
+
+```bash
+uv run black src/
+```
+
+To check types:
+
+```bash
+uv run mypy src/
+```
+
+</details>
+
+## Collaboration Workflow
+
+This project includes built-in functionality for easy collaboration between team members:
+
+<details>
+<summary><strong>📤 Exporting Your Graph (click to expand)</strong></summary>
+
+1. After running KG construction, note the generated UUID
+2. Export your graph using: `python3 -m src.cli.main export --config config/base_config.yaml --graph-uuid <your-uuid> --output my_graph.json`
+3. Share the `my_graph.json` file with your collaborators
+
+</details>
+
+<details>
+<summary><strong>📥 Importing a Graph from a Collaborator (click to expand)</strong></summary>
+
+1. Receive a `.json` export file from your collaborator
+2. Import it using: `python3 -m src.cli.main import --config config/base_config.yaml --input path/to/collaborator_graph.json`
+3. The imported graph will be available in your Neo4j with its own UUID
+
+</details>
+
+This enables seamless sharing and merging of knowledge graphs between team members without requiring database access or complex data transfers.
+
+## License
+
+MIT License

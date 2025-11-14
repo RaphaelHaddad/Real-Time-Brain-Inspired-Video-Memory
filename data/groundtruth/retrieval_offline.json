@@ -1,0 +1,122 @@
+[
+  {
+    "query": "What color are the gloves worn by the person in the lab?",
+    "groundtruth": "blue"
+  },
+  {
+    "query": "What is the title of the document being filled out on the lab bench?",
+    "groundtruth": "AR Glasses Training Chemistry Experiment Report (Simplified Version)"
+  },
+  {
+    "query": "What chemical is being weighed in the bottle with the red cap?",
+    "groundtruth": "sodium hydroxide"
+  },
+  {
+    "query": "What equipment is used to accurately measure the white powder substance?",
+    "groundtruth": "Mettler Toledo analytical balance"
+  },
+  {
+    "query": "What is the final weight shown on the digital balance after measuring the substance?",
+    "groundtruth": "80.15 grams"
+  },
+  {
+    "query": "What type of glassware is being used to prepare a solution of precise volume?",
+    "groundtruth": "volumetric flask"
+  },
+  {
+    "query": "What is the displayed reading on the balance when the beaker is being tared?",
+    "groundtruth": "-56.301 g"
+  },
+  {
+    "query": "What personal accessory is visible on the person's wrist while handling lab equipment?",
+    "groundtruth": "gold-colored watch with black strap"
+  },
+  {
+    "query": "What is the person doing with the volumetric flask after adding the liquid?",
+    "groundtruth": "sealing it with a stopper and shaking it to mix the contents"
+  },
+  {
+    "query": "What is the balanced chemical equation for the reaction between aluminum and sodium hydroxide?",
+    "groundtruth": "2Al + 2NaOH + 6H2O → 2Na[Al(OH)4] + 3H2↑"
+  },
+  {
+    "query": "Who is observing the experimental procedure in the background wearing a cream-colored sweater?",
+    "groundtruth": "a person with long, dark, curly hair"
+  },
+  {
+    "query": "What material is used to prepare a sample for weighing on the balance?",
+    "groundtruth": "aluminum foil"
+  },
+  {
+    "query": "What safety equipment is visible on the wall in the laboratory?",
+    "groundtruth": "fire extinguisher"
+  },
+  {
+    "query": "What type of measurement is being performed with the burette and graduated cylinder?",
+    "groundtruth": "titration"
+  },
+  {
+    "query": "What is the purpose of the glass enclosure around the analytical balance?",
+    "groundtruth": "to protect the sample from air currents and ensure accurate measurements"
+  },
+  {
+    "query": "What gas is being produced in the chemical reaction shown in the flask on the stirrer?",
+    "groundtruth": "hydrogen gas"
+  },
+  {
+    "query": "What two main chemicals are used to produce hydrogen gas in this experiment?",
+    "groundtruth": "aluminum and sodium hydroxide"
+  },
+  {
+    "query": "What is the purpose of the AR glasses mentioned in the experiment report?",
+    "groundtruth": "to guide or document the chemistry experiment with overlaid instructions and data"
+  },
+  {
+    "query": "What color is the sweater worn by the person with curly hair throughout the video?",
+    "groundtruth": "cream-colored or beige"
+  },
+  {
+    "query": "What was the initial amount of aluminum specified in the experiment report for producing hydrogen gas?",
+    "groundtruth": "8g"
+  },
+  {
+    "query": "What equipment is used to continuously mix the contents of the reaction flask?",
+    "groundtruth": "magnetic stirrer"
+  },
+  {
+    "query": "How does the person ensure accurate measurement when weighing the sodium hydroxide?",
+    "groundtruth": "by using a glass enclosure (draft shield) around the balance to prevent air currents from affecting the measurement"
+  },
+  {
+    "query": "What safety symbols are visible on the sodium hydroxide bottle?",
+    "groundtruth": "corrosive hazard symbols indicating it can cause severe skin burns and eye damage"
+  },
+  {
+    "query": "What technique is used to transfer small amounts of liquid precisely in the experiment?",
+    "groundtruth": "pipetting"
+  },
+  {
+    "query": "What was the purpose of the document being filled out at the beginning of the experiment?",
+    "groundtruth": "to record observations and data for the chemistry experiment involving hydrogen gas production"
+  },
+  {
+    "query": "What was the measured volume of gas produced in the chemical reaction?",
+    "groundtruth": "2mL and 100mL"
+  },
+  {
+    "query": "What type of stirrer is used to mix the cloudy white solution in the later part of the video?",
+    "groundtruth": "magnetic stirrer"
+  },
+  {
+    "query": "What is the concentration of the sodium hydroxide solution mentioned in the experiment?",
+    "groundtruth": "2mol/L"
+  },
+  {
+    "query": "What type of warning sign is visible on the wall of the laboratory?",
+    "groundtruth": "High Voltage warning sign"
+  },
+  {
+    "query": "What equipment is used to collect gas produced by the reaction in the experiment?",
+    "groundtruth": "a tube connected to a container filled with water (gas collection by water displacement)"
+  }
+]
