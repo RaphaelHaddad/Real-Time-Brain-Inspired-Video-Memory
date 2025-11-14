@@ -44,6 +44,10 @@ class GraphExporter:
         Export a knowledge graph with the specified UUID to a JSON file
         for collaboration and transfer to other Neo4j instances.
         """
+        # Verify Neo4j connection before proceeding
+        if not await self.neo4j_handler.verify_connection():
+            raise ConnectionError("Cannot connect to Neo4j database. Please ensure Neo4j is running and accessible.")
+        
         try:
             output_file = Path(output_path)
             output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -145,6 +149,10 @@ class GraphImporter:
         Import a knowledge graph from an exported JSON file.
         If new_uuid is provided, it will replace the original UUID in the imported graph.
         """
+        # Verify Neo4j connection before proceeding
+        if not await self.neo4j_handler.verify_connection():
+            raise ConnectionError("Cannot connect to Neo4j database. Please ensure Neo4j is running and accessible.")
+        
         try:
             input_file = Path(input_path)
             if not input_file.exists():
@@ -182,8 +190,13 @@ class GraphImporter:
                     logger.warning(f"Skipping node with missing or null name: {node}")
                     continue
                 
-                # Build dynamic labels
-                label_str = ":".join(node["labels"]) if node["labels"] else "Entity"
+                # Build dynamic labels and re-apply the internal GraphNode label so relationships can match
+                labels = list(node.get("labels") or [])
+                if not labels:
+                    labels = ["Entity"]
+                if "GraphNode" not in labels:
+                    labels.append("GraphNode")
+                label_str = ":".join(labels)
                 
                 # Add graph_uuid to properties
                 props = {**node["properties"], "graph_uuid": graph_uuid, "name": node["name"]}

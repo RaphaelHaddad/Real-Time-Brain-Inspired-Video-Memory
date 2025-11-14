@@ -52,7 +52,7 @@ The architecture encourages experimentation: swap the VLM backend, adjust the in
    ```bash
    uv venv
    source .venv/bin/activate
-   uv pip install -r requirements.txt
+   uv pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
    ```
 
 ## Configuration
@@ -163,50 +163,8 @@ To import with a specific UUID:
 python3 -m src.cli.main import --config config/base_config.yaml --input exported_graph.json --new-uuid <your-desired-uuid>
 ```
 
-### 6. Run Benchmark Evaluation
-
-Evaluate retrieval quality using LLM-based benchmarking:
-
-```bash
-python3 -m src.cli.main benchmark --config config/base_config.yaml --input retrieval_results.json --output benchmark_results.json
-```
-
-The benchmark pipeline:
-1. **Generates answers** using the LLM with retrieved context
-2. **Evaluates correctness** against ground truth answers
-3. **Reports accuracy** and detailed results
-
-See [BENCHMARK_GUIDE.md](BENCHMARK_GUIDE.md) for detailed documentation.
-
-## Pre-injection vs Injection
-
 <details>
-<summary><strong>🔄 Pre-injection vs Injection Details (click to expand)</strong></summary>
-
-The KG construction pipeline runs in two LLM-assisted phases when hierarchical
-extraction is enabled:
-
-- **Pre-injection (pre-extraction)**: the VLM output is split into small, token-aware
-  chunks. A lightweight LLM prompt runs on each chunk to extract compact
-  candidate triplets (head, relation, tail). These are deduplicated locally and
-  optionally passed through a fast global refiner to merge near-duplicates.
-- **Injection (final enrichment)**: the aggregated candidate triplets (not the raw
-  VLM text) are sent to a final LLM prompt which consolidates, normalizes, and
-  enriches the triplets before they are written to Neo4j.
-
-This two-step approach keeps the final prompt small (avoiding token overflow),
-speeds up extraction by parallelizing chunk-level calls, and gives you a clear
-audit trail of how triplets were produced.
-
-Prompts used by both stages live in `src/components/prompts.py` so you can
-edit them in one place. The file exposes builders that preserve the placeholder
-variables the code relies on (for example: `{input}`, `{max_triplets}`,
-`{pre_extracted_triplets}`, `{network_info}`).
-
-</details>
-
-<details>
-<summary><strong>🔎 7. View Graph in Neo4j Browser (click to expand)</strong></summary>
+<summary><strong>🔎 View Graph in Neo4j Browser (click to expand)</strong></summary>
 
 ![Graph Visualization](data/images/graph.png)
 
@@ -267,6 +225,50 @@ After building your knowledge graph, you can visualize and explore it using Neo4
 - Export visualizations as PNG/SVG for documentation
 
 </details>
+
+### 6. Run Benchmark Evaluation
+
+Evaluate retrieval quality using LLM-based benchmarking:
+
+```bash
+python3 -m src.cli.main benchmark --config config/base_config.yaml --input retrieval_results.json --output benchmark_results.json
+```
+
+The benchmark pipeline:
+1. **Generates answers** using the LLM with retrieved context
+2. **Evaluates correctness** against ground truth answers
+3. **Reports accuracy** and detailed results
+
+See [BENCHMARK_GUIDE.md](BENCHMARK_GUIDE.md) for detailed documentation.
+
+## Pre-injection vs Injection
+
+<details>
+<summary><strong>🔄 Pre-injection vs Injection Details (click to expand)</strong></summary>
+
+The KG construction pipeline runs in two LLM-assisted phases when hierarchical
+extraction is enabled:
+
+- **Pre-injection (pre-extraction)**: the VLM output is split into small, token-aware
+  chunks. A lightweight LLM prompt runs on each chunk to extract compact
+  candidate triplets (head, relation, tail). These are deduplicated locally and
+  optionally passed through a fast global refiner to merge near-duplicates.
+- **Injection (final enrichment)**: the aggregated candidate triplets (not the raw
+  VLM text) are sent to a final LLM prompt which consolidates, normalizes, and
+  enriches the triplets before they are written to Neo4j.
+
+This two-step approach keeps the final prompt small (avoiding token overflow),
+speeds up extraction by parallelizing chunk-level calls, and gives you a clear
+audit trail of how triplets were produced.
+
+Prompts used by both stages live in `src/components/prompts.py` so you can
+edit them in one place. The file exposes builders that preserve the placeholder
+variables the code relies on (for example: `{input}`, `{max_triplets}`,
+`{pre_extracted_triplets}`, `{network_info}`).
+
+</details>
+
+
 
 ### 8. Run Single Offline Retrieval
 

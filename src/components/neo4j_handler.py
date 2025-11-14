@@ -34,6 +34,22 @@ class Neo4jHandler:
         # Initialize schema and constraints
         # asyncio.create_task(self._initialize_database())
 
+    async def verify_connection(self) -> bool:
+        """Verify that Neo4j is accessible by running a simple query"""
+        try:
+            async with self.driver.session() as session:
+                result = await session.run("RETURN 'Neo4j is accessible' as message")
+                record = await result.single()
+                if record and record["message"] == "Neo4j is accessible":
+                    logger.info("Neo4j connection verified successfully")
+                    return True
+                else:
+                    logger.error("Neo4j connection verification failed: unexpected response")
+                    return False
+        except Exception as e:
+            logger.error(f"Neo4j connection verification failed: {str(e)}")
+            return False
+
     async def _initialize_database(self):
         """Initialize database schema and constraints"""
         async with self.driver.session() as session:
