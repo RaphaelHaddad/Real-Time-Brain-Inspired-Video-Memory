@@ -1,6 +1,8 @@
 import json
-from datetime import datetime
 import copy
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
+import numpy as np
 
 class Graph:
     def __init__(self, graph_data):
@@ -10,7 +12,7 @@ class Graph:
         self.original_node_count = len(self.nodes)
         self.original_rel_count = len(self.relationships)
         self.relelation_types = self._get_relation_types()
-        
+        self.embedding_model = SentenceTransformer('Qwen/Qwen3-Embedding-0.6B')
     def _get_node_name_list(self):
         name_list = []
         for node in self.nodes:
@@ -51,11 +53,32 @@ class Graph:
 
         return results
             
-    def prune_graph(self):
-        """
-        Prunes graph based on relationships between any two nodes.
-        keep only one per direction. Need more effective way to decide which one to prune and which one to keep.
-        """
+    def _get_representative_relation(self, relation_sentences):
+        '''
+        Return index of the most representative relation among many directed relation closest to central meaning.
+        '''
+        embeddings = self.embedding_model.encode(relation_sentences)
+        centroid = np.mean(embeddings, axis=0)
+        similarities = cosine_similarity([centroid], embeddings)[0]
+        print("\nSIMILARITIES: \n", similarities)
+        most_representative_idx = np.argmax(similarities)
+        return most_representative_idx
+
+    def _are_same_context(self, relation_sentences, threshold=0.8):
+        '''
+        Decide whether the relations represent same context or not, 
+        if they don't reprsent same context we don't prune the relation. 
+        For now it finds if there are at least two same context relations.
+        '''
+        if len(relation_sentences) <= 1:
+            return False
+        embeddings = self.embedding_model.encode(relation_sentences)
+        similarity_matrix = cosine_similarity(embeddings)
+        np.fill_diagonal(similarity_matrix, 0)
+        
+        return np.any(similarity_matrix > threshold)
+
+    def prune_graph(self, similarity_threshold=0.8):
         processed_pairs = set()
         new_relationships = []
         
@@ -69,33 +92,44 @@ class Graph:
             if pair_key in processed_pairs:
                 continue
             processed_pairs.add(pair_key)
+            
             relations = self.relation_between_two_nodes(node1, node2)
             
-            if len(relations) > 2:
-                directed_relations = {"node1_to_node2": None, "node2_to_node1": None}
-                
-                # Separate the relations into two categories
-                for r in relations:
-                    fn, tn = r["from_node"], r["to_node"]
-                    if fn == node1 and tn == node2 and directed_relations["node1_to_node2"] is None:
-                        directed_relations["node1_to_node2"] = r
-                    elif fn == node2 and tn == node1 and directed_relations["node2_to_node1"] is None:
-                        directed_relations["node2_to_node1"] = r
-                
-                if directed_relations["node1_to_node2"]:
-                    new_relationships.append(directed_relations["node1_to_node2"])
-                if directed_relations["node2_to_node1"]:
-                    new_relationships.append(directed_relations["node2_to_node1"])
-            else:
+            if len(relations) <= 1:
                 new_relationships.extend(relations)
+                continue
+            
+            node1_to_node2 = [r for r in relations if r['from_node'] == node1 and r['to_node'] == node2]
+            node2_to_node1 = [r for r in relations if r['from_node'] == node2 and r['to_node'] == node1]
+            
+            for direction_relations in [node1_to_node2, node2_to_node1]:
+                if not direction_relations:
+                    continue
+                
+                if len(direction_relations) == 1:
+                    new_relationships.append(direction_relations[0])
+                else:
+                    relation_sentences = []
+                    for r in direction_relations:
+                        rel_type = r['type'].replace("_", " ")
+                        sentence = f"{r['from_node']} {rel_type} {r['to_node']}"
+                        relation_sentences.append(sentence)
+                    if self._are_same_context(relation_sentences, similarity_threshold):
+                        representative_idx = self._get_representative_relation(
+                            relation_sentences, 
+                        )
+                        new_relationships.append(direction_relations[representative_idx])
+                        print(f"Pruned {len(direction_relations)} similar relations to 1 between {direction_relations[0]['from_node']} → {direction_relations[0]['to_node']}")
+                    else:
+                        new_relationships.extend(direction_relations)
         
-        print(f"Pruned from {len(self.relationships)} to {len(new_relationships)} relationships")
+
         return new_relationships
         
 
 def main():
     input_file = "data/outputs/exported_graph_8679eaa5-1b21-4975-b7d6-c86e3a9c958d.json"
-    output_file = "data/outputs/pruned_graph_8679eaa5-1b21-4975-b7d6-c86e3a9c958d.json"
+    output_file = "data/outputs/pruned_with_embedding_graph_8679eaa5-1b21-4975-b7d6-c86e3a9c958d.json"
 
     with open(input_file, 'r', encoding='utf-8') as f:
         graph_data = json.load(f)
