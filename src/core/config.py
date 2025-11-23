@@ -38,6 +38,11 @@ class ChunkingConfig(BaseModel):
     refinement_max_tokens: int = 500  # Global refinement call limit (reduced)
     global_triplet_limit: int = 25  # Max triplets passed to refinement/final LLM
     batch_llm_parallelism: bool = True  # Enable parallel LLM calls; set to false for serial execution
+    # Limits for instruction-based global refinement outputs
+    max_new_triplets: int = 15
+    max_inter_chunk_relations: int = 15
+    max_merge_instructions: int = 10
+    max_prune_instructions: int = 10
 
 class KGConfig(BaseModel):
     batch_size: int = Field(6, gt=0)

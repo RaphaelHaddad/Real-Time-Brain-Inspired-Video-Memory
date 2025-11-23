@@ -300,6 +300,10 @@ class GlobalRefiner:
             prompt = self.instruction_prompt_template.format(
                 subgraph_context=subgraph_context,
                 pre_extracted_triplets=triplets_json,
+                max_new_triplets=getattr(self.chunking_config, 'max_new_triplets', 15),
+                max_inter_chunk_relations=getattr(self.chunking_config, 'max_inter_chunk_relations', 15),
+                max_merge_instructions=getattr(self.chunking_config, 'max_merge_instructions', 10),
+                max_prune_instructions=getattr(self.chunking_config, 'max_prune_instructions', 10),
             )
 
             logger.debug(f"Instruction-based refinement full input prompt: {prompt}")

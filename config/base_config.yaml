@@ -32,6 +32,11 @@ chunking:
   enable_global_refinement: true
   refinement_max_tokens: 2000
   global_triplet_limit: 25
+  # Limits for instruction-based global refinement outputs
+  max_new_triplets: 20
+  max_inter_chunk_relations: 10
+  max_merge_instructions: 5
+  max_prune_instructions: 5
   batch_llm_parallelism: false
 
 kg:
