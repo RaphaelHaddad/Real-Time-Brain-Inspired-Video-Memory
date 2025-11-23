@@ -166,7 +166,7 @@ class KGBuilder:
                     refine_start = time.perf_counter()
                     if self.config.llm_injector.subgraph_extraction_injection:
                         # Use instruction-based refinement with subgraphs
-                        pre_triplets = await self.global_refiner.refine_triplets_instruction_based(
+                        pre_triplets, operations = await self.global_refiner.refine_triplets_instruction_based(
                             pre_triplets, subgraphs, global_limit
                         )
                     else:
@@ -201,7 +201,8 @@ class KGBuilder:
                     cleaned_triplets,
                     batch_data=batch,
                     batch_idx=batch_idx,
-                    text_chunks=text_chunks
+                    text_chunks=text_chunks,
+                    operations=(locals().get('operations') if 'operations' in locals() else None)
                 )
                 neo4j_time = time.perf_counter() - neo4j_start
 

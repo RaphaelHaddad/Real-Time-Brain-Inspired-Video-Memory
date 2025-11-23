@@ -43,6 +43,9 @@ class ChunkingConfig(BaseModel):
     max_inter_chunk_relations: int = 15
     max_merge_instructions: int = 10
     max_prune_instructions: int = 10
+    # Timeout & retry for per-chunk LLM extraction
+    chunk_timeout_seconds: float = 45.0
+    chunk_timeout_retries: int = 0
 
 class KGConfig(BaseModel):
     batch_size: int = Field(6, gt=0)

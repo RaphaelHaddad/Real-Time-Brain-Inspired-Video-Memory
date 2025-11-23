@@ -37,6 +37,9 @@ chunking:
   max_inter_chunk_relations: 10
   max_merge_instructions: 5
   max_prune_instructions: 5
+  # Per-chunk LLM timeout/retry
+  chunk_timeout_seconds: 5.0
+  chunk_timeout_retries: 3
   batch_llm_parallelism: false
 
 kg:

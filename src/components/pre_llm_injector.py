@@ -506,33 +506,43 @@ class PreLLMInjector:
         """
         prompt = self.prompt_template.invoke({"input": chunk_text})
         
-        # TIMEOUT CONFIG: 
-        # For local LLMs, 45-60s is usually safe. 
-        # If it takes longer, the server is likely stuck.
-        TIMEOUT_SECONDS = 45.0 
+        # TIMEOUT CONFIG: use values from chunking config (defaults keep previous behavior)
+        timeout_seconds = getattr(self.config, 'chunk_timeout_seconds', 45.0)
+        timeout_retries = int(getattr(self.config, 'chunk_timeout_retries', 0) or 0)
 
-        try:
-            logger.debug(f"Calling LLM on chunk {chunk_idx} (ID={chunk_id}) (~{len(chunk_text.split())} words)")
-            
-            # THE FIX: Wrap the API call in wait_for
-            response = await asyncio.wait_for(
-                self.chain.ainvoke(prompt),
-                timeout=TIMEOUT_SECONDS
-            )
+        logger.debug(f"Calling LLM on chunk {chunk_idx} (ID={chunk_id}) (~{len(chunk_text.split())} words) with timeout={timeout_seconds}s retries={timeout_retries}")
 
-            # Parse the pipe-delimited output
-            llm_output = getattr(response, 'content', str(response)).strip()
-            triplets = self._parse_pipe_delimited_output(llm_output, chunk_idx, chunk_id)
-            logger.debug(f"Extracted {len(triplets)} triplets from chunk {chunk_idx}")
-            return triplets
+        # Try with retries on timeouts
+        for attempt in range(timeout_retries + 1):
+            try:
+                response = await asyncio.wait_for(
+                    self.chain.ainvoke(prompt),
+                    timeout=timeout_seconds
+                )
 
-        except asyncio.TimeoutError:
-            logger.warning(f"⚠️ Chunk {chunk_idx} TIMED OUT after {TIMEOUT_SECONDS}s. Skipping.")
-            return [] # Return empty list so pipeline continues
-            
-        except Exception as e:
-            logger.error(f"Error extracting from chunk {chunk_idx}: {e}")
-            return []
+                # Parse the pipe-delimited output
+                llm_output = getattr(response, 'content', str(response)).strip()
+                triplets = self._parse_pipe_delimited_output(llm_output, chunk_idx, chunk_id)
+                logger.debug(f"Extracted {len(triplets)} triplets from chunk {chunk_idx} (attempt {attempt+1})")
+                return triplets
+
+            except asyncio.TimeoutError:
+                # If we have retries left, log and continue; otherwise skip
+                if attempt < timeout_retries:
+                    logger.warning(f"Chunk {chunk_idx} timed out after {timeout_seconds}s (attempt {attempt+1}/{timeout_retries+1}), retrying...")
+                    # small backoff
+                    try:
+                        await asyncio.sleep(min(0.5 * (attempt + 1), 2.0))
+                    except Exception:
+                        pass
+                    continue
+                else:
+                    logger.warning(f"⚠️ Chunk {chunk_idx} TIMED OUT after {timeout_seconds}s on final attempt. Skipping.")
+                    return []
+
+            except Exception as e:
+                logger.error(f"Error extracting from chunk {chunk_idx} (attempt {attempt+1}): {e}")
+                return []
 
     def _parse_pipe_delimited_output(self, llm_output: str, chunk_idx: int, chunk_id: str) -> List[Dict[str, Any]]:
         """Parse pipe-delimited triplet output into dict format"""

@@ -83,7 +83,7 @@ class Neo4jHandler:
         
         logger.info("Created graph indexes")
 
-    async def add_batch_to_graph(self, triplets: List[Dict[str, Any]], batch_data: List[Dict], batch_idx: int = 0, text_chunks: List[Dict[str, Any]] = None) -> Dict[str, float]:
+    async def add_batch_to_graph(self, triplets: List[Dict[str, Any]], batch_data: List[Dict], batch_idx: int = 0, text_chunks: List[Dict[str, Any]] = None, operations: Dict[str, Any] = None) -> Dict[str, float]:
         """Add a batch of triplets AND text chunks to the graph (hybrid mode)"""
         start_time = time.perf_counter()
         timings = {
@@ -105,6 +105,45 @@ class Neo4jHandler:
                 
                 # Always create chunk nodes for hybrid retrieval
                 await self._create_chunks_with_embeddings(session, batch_data, triplets, batch_idx, text_chunks)
+                
+                # After creating triplets and chunks, optionally apply operations (merge/link/prune)
+                if operations:
+                    # Log counts before operations
+                    try:
+                        nodes_before = await session.run(
+                            "MATCH (n:GraphNode) WHERE n.graph_uuid = $graph_uuid RETURN count(n) as cnt",
+                            graph_uuid=self.run_uuid
+                        )
+                        rels_before = await session.run(
+                            "MATCH ()-[r]->() WHERE r.graph_uuid = $graph_uuid RETURN count(r) as cnt",
+                            graph_uuid=self.run_uuid
+                        )
+                        nb = (await nodes_before.single())['cnt'] if nodes_before else 0
+                        rb = (await rels_before.single())['cnt'] if rels_before else 0
+                        logger.debug(f"Graph counts before operations: nodes={nb}, relationships={rb}")
+                    except Exception as e:
+                        logger.debug(f"Failed to fetch counts before operations: {e}")
+
+                    try:
+                        await self._apply_operations(session, operations, batch_idx)
+                    except Exception as e:
+                        logger.warning(f"Failed to apply operations: {e}")
+
+                    # Log counts after operations
+                    try:
+                        nodes_after = await session.run(
+                            "MATCH (n:GraphNode) WHERE n.graph_uuid = $graph_uuid RETURN count(n) as cnt",
+                            graph_uuid=self.run_uuid
+                        )
+                        rels_after = await session.run(
+                            "MATCH ()-[r]->() WHERE r.graph_uuid = $graph_uuid RETURN count(r) as cnt",
+                            graph_uuid=self.run_uuid
+                        )
+                        na = (await nodes_after.single())['cnt'] if nodes_after else 0
+                        ra = (await rels_after.single())['cnt'] if rels_after else 0
+                        logger.debug(f"Graph counts after operations: nodes={na}, relationships={ra}")
+                    except Exception as e:
+                        logger.debug(f"Failed to fetch counts after operations: {e}")
                 
                 injection_time = time.perf_counter() - injection_start
                 timings["graph_injection_time"] = injection_time
@@ -402,6 +441,99 @@ class Neo4jHandler:
             logger.info("Verified/created graph indexes")
         except Exception as e:
             logger.warning(f"Index verification/creation warning: {e}")
+
+    async def _apply_operations(self, session, operations: Dict[str, Any], batch_idx: int = 0):
+        """Apply merge, inter_chunk_relations, and prune operations in the recommended order.
+
+        Operations dict expected keys: new_triplets, inter_chunk_relations, merge_instructions, prune_instructions
+        """
+        if not operations:
+            return
+
+        merges = operations.get('merge_instructions') or []
+        inter_links = operations.get('inter_chunk_relations') or []
+        prunes = operations.get('prune_instructions') or []
+
+        # 1) Merges
+        if merges:
+            logger.info(f"Applying {len(merges)} merge instructions")
+            for m in merges:
+                local = m.get('local')
+                existing = m.get('existing')
+                existing_id = m.get('existing_id')
+                try:
+                    # Try APOC merge (best effort). If APOC is not available, fallback to copying FROM_CHUNK and source_chunk_ids and deleting local.
+                    apoc_query = """
+                    MATCH (l:Entity:GraphNode {name: $local, graph_uuid: $graph_uuid})
+                    MATCH (e:Entity:GraphNode {name: $existing, graph_uuid: $graph_uuid})
+                    CALL apoc.refactor.mergeNodes([l,e], {properties:'combine', mergeRels:true}) YIELD node
+                    RETURN node
+                    """
+                    await session.run(apoc_query, local=local, existing=existing, graph_uuid=self.run_uuid)
+                except Exception:
+                    # Fallback: transfer FROM_CHUNK relationships and source_chunk_ids
+                    try:
+                        transfer_query = """
+                        MATCH (l:Entity:GraphNode {name: $local, graph_uuid: $graph_uuid})
+                        MATCH (e:Entity:GraphNode {name: $existing, graph_uuid: $graph_uuid})
+                        // transfer FROM_CHUNK edges
+                        WITH l,e
+                        OPTIONAL MATCH (l)-[f:FROM_CHUNK]->(c:Chunk:GraphNode)
+                        FOREACH (r IN CASE WHEN f IS NULL THEN [] ELSE [f] END |
+                          MERGE (e)-[:FROM_CHUNK]->(c)
+                        )
+                        // aggregate chunk ids
+                        WITH l,e
+                        OPTIONAL MATCH (l)-[:FROM_CHUNK]->(c2:Chunk:GraphNode)
+                        WITH e, collect(DISTINCT c2.id) as new_chunks
+                        SET e.source_chunk_ids = coalesce(e.source_chunk_ids, []) + new_chunks
+                        // remove local node
+                        WITH l
+                        DETACH DELETE l
+                        """
+                        await session.run(transfer_query, local=local, existing=existing, graph_uuid=self.run_uuid)
+                    except Exception as e:
+                        logger.warning(f"Fallback merge failed for {local} -> {existing}: {e}")
+
+        # 2) Inter-chunk relations
+        if inter_links:
+            logger.info(f"Applying {len(inter_links)} inter-chunk relations")
+            for it in inter_links:
+                try:
+                    head = it[0]
+                    rel = it[1]
+                    tail = it[2]
+                    source_chunks = it[3] if len(it) > 3 and isinstance(it[3], list) else []
+                    rel_label = rel.replace(' ', '_').upper()
+                    query = f"""
+                    MATCH (h:Entity:GraphNode {{name: $head, graph_uuid: $graph_uuid}})
+                    MATCH (t:Entity:GraphNode {{name: $tail, graph_uuid: $graph_uuid}})
+                    MERGE (h)-[r:`{rel_label}` {{graph_uuid: $graph_uuid}}]->(t)
+                    SET r.source_chunks = coalesce(r.source_chunks, []) + $source_chunks,
+                        r.batch_id = $batch_idx
+                    """
+                    await session.run(query, head=head, tail=tail, graph_uuid=self.run_uuid, source_chunks=source_chunks, batch_idx=batch_idx)
+                except Exception as e:
+                    logger.warning(f"Failed to create inter-chunk relation {it}: {e}")
+
+        # 3) Prunes (delete specific relationships)
+        if prunes:
+            logger.info(f"Applying {len(prunes)} prune instructions")
+            for p in prunes:
+                try:
+                    head = p.get('head')
+                    rel = p.get('relation')
+                    tail = p.get('tail')
+                    source_id = p.get('source_id')
+                    rel_label = rel.replace(' ', '_').upper()
+                    prune_query = f"""
+                    MATCH (h:Entity:GraphNode {{name: $head, graph_uuid: $graph_uuid}})-[r:`{rel_label}`]->(t:Entity:GraphNode {{name: $tail, graph_uuid: $graph_uuid}})
+                    WHERE $source_id IN coalesce(r.source_chunks, [])
+                    DELETE r
+                    """
+                    await session.run(prune_query, head=head, tail=tail, graph_uuid=self.run_uuid, source_id=source_id)
+                except Exception as e:
+                    logger.warning(f"Failed to prune {p}: {e}")
 
     async def get_node_count(self) -> int:
         """Get the count of nodes in the current graph run"""

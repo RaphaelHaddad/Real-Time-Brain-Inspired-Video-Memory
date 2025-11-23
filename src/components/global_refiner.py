@@ -238,7 +238,7 @@ class GlobalRefiner:
     async def refine_triplets_instruction_based(
         self, triplets: List[Dict[str, Any]], subgraphs: Dict[str, str] = None,
         global_limit: int = 25
-    ) -> List[Dict[str, Any]]:
+    ) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """
         Advanced instruction-based refinement with operations and subgraph context
 
@@ -426,7 +426,8 @@ class GlobalRefiner:
                 f"Instruction-based refinement complete: {len(capped_triplets)} → {len(refined)} triplets (total: {refine_time:.2f}s, LLM: {llm_time:.2f}s)"
             )
 
-            return refined
+            # Return both refined triplets and the parsed operations so caller can apply DB changes
+            return refined, parsed_op
 
         except Exception as e:
             refine_time = time.perf_counter() - refine_start
@@ -434,4 +435,9 @@ class GlobalRefiner:
             # Fallback: return deduplicated input
             deduped = self._deduplicate_triplets(triplets[:global_limit])
             logger.info(f"Using fallback deduplication: {len(triplets[:global_limit])} → {len(deduped)} triplets")
-            return deduped
+            return deduped, {
+                "new_triplets": [],
+                "inter_chunk_relations": [],
+                "merge_instructions": [],
+                "prune_instructions": [],
+            }
