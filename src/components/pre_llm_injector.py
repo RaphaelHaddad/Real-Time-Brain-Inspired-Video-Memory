@@ -12,7 +12,7 @@ from langchain_text_splitters import TokenTextSplitter
 from langchain_experimental.graph_transformers import LLMGraphTransformer
 from langchain_core.language_models import BaseChatModel
 from langchain_core.documents import Document
-from ..core.config import ChunkingConfig
+from ..core.config import ChunkingConfig, EmbedderConfig, LLMInjectorConfig
 from ..core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -21,9 +21,11 @@ logger = get_logger(__name__)
 class PreLLMInjector:
     """Local extraction from chunks using optimized pipe-delimited LLM calls"""
 
-    def __init__(self, llm: BaseChatModel, config: ChunkingConfig):
+    def __init__(self, llm: BaseChatModel, config: ChunkingConfig, embedder_config: EmbedderConfig = None, llm_injector_config: LLMInjectorConfig = None):
         self.config = config
         self.llm = llm
+        self.embedder_config = embedder_config
+        self.llm_injector_config = llm_injector_config
         # Holds details from the last extraction for external tracing/logging
         self.last_chunk_details: List[Dict[str, Any]] = []
         # Build a ChatPromptTemplate using the centralized prompts module so prompts
@@ -43,11 +45,12 @@ class PreLLMInjector:
         logger.info(
             f"Initialized PreLLMInjector: chunk_size={config.chunk_size}, "
             f"overlap={config.chunk_overlap}, parallel={config.parallel_count}, "
-            f"max_triplets_per_chunk={config.max_triplets_per_chunk}"
+            f"max_triplets_per_chunk={config.max_triplets_per_chunk}, "
+            f"subgraph_extraction={llm_injector_config.subgraph_extraction_injection if llm_injector_config else False}"
         )
 
     async def extract_local_triplets(
-        self, content: str, network_info: str = ""
+        self, content: str, network_info: str = "", neo4j_handler = None
     ) -> List[Dict[str, Any]]:
         """
         Extract triplets from content using hierarchical chunking + local extraction
@@ -66,17 +69,19 @@ class PreLLMInjector:
                 f"Split content into {len(chunks)} chunks (chunk_size={self.config.chunk_size}, overlap={self.config.chunk_overlap})"
             )
 
-            # Log a sample of the first few chunks (truncated) to aid debugging
-            for i, c in enumerate(chunks[:3]):
-                short = (c[:400] + '...') if len(c) > 400 else c
-                logger.debug(f"Chunk[{i}] ~{len(c.split())} words, sample: {short}")
+            # Log full content of chunks to aid debugging
+            for i, c in enumerate(chunks):
+                logger.debug(f"Chunk[{i}] ~{len(c.split())} words, full content: {c}")
 
             if not chunks:
                 logger.warning("No chunks produced from content")
                 return []
 
-            # Extract triplets from each chunk in parallel (now returns triplets with chunk indices)
-            triplets = await self._parallel_chunk_extraction(chunks)
+            # Extract triplets from each chunk in parallel
+            if self.llm_injector_config and self.llm_injector_config.subgraph_extraction_injection:
+                triplets = await self._parallel_chunk_extraction_with_similarity(chunks, neo4j_handler)
+            else:
+                triplets = await self._parallel_chunk_extraction(chunks)
 
             # Deduplicate at local level (preserves source_chunks)
             triplets = self._deduplicate_triplets(triplets)
@@ -93,7 +98,33 @@ class PreLLMInjector:
     async def _parallel_chunk_extraction(
         self, chunks: List[str]
     ) -> List[Dict[str, Any]]:
-        """Extract triplets from multiple chunks in parallel, tracking chunk indices"""
+        """Extract triplets from multiple chunks in parallel or serially based on config, tracking chunk indices"""
+        if not self.config.batch_llm_parallelism:
+            # Serial execution
+            logger.debug("Using serial LLM extraction (batch_llm_parallelism=false)")
+            all_triplets: List[Dict[str, Any]] = []
+            self.last_chunk_details = []
+            for i, chunk in enumerate(chunks):
+                try:
+                    result = await self._extract_chunk_triplets(chunk, i)
+                    logger.debug(f"Chunk {i} returned {len(result)} triplets")
+                    self.last_chunk_details.append({
+                        "chunk_index": i,
+                        "chunk_text": chunk,
+                        "triplets": result,
+                    })
+                    all_triplets.extend(result)
+                except Exception as e:
+                    logger.warning(f"Chunk {i} extraction failed: {e}")
+                    self.last_chunk_details.append({
+                        "chunk_index": i,
+                        "chunk_text": chunk,
+                        "triplets": [],
+                        "error": str(e),
+                    })
+            return all_triplets
+        
+        # Parallel execution (original logic)
         # Limit concurrency to avoid overwhelming the LLM
         semaphore = asyncio.Semaphore(self.config.parallel_count)
 
@@ -130,27 +161,221 @@ class PreLLMInjector:
 
         return all_triplets
 
-    async def _extract_chunk_triplets(self, chunk: str, chunk_idx: int = 0) -> List[Dict[str, Any]]:
-        """Extract triplets from a single chunk using optimized pipe-delimited LLM call"""
+    async def _parallel_chunk_extraction_with_similarity(self, chunks: List[str], neo4j_handler) -> List[Dict[str, Any]]:
+        """Extract triplets with subgraph similarity calculation"""
+        import asyncio
+        from langchain_openai import OpenAIEmbeddings
+        
+        # Initialize embedder
+        embedder = OpenAIEmbeddings(
+            base_url=self.embedder_config.endpoint,
+            api_key=self.embedder_config.api_key,
+            model=self.embedder_config.model,
+        )
+        
+        # Start embedding tasks for all chunks (keep parallel as embeddings are fast)
+        embedding_tasks = []
+        for chunk in chunks:
+            task = embedder.aembed_query(chunk)
+            embedding_tasks.append(task)
+        
+        # Wait for embeddings to complete
+        logger.debug("Starting chunk embedding tasks...")
+        chunk_embeddings = await asyncio.gather(*embedding_tasks, return_exceptions=True)
+        
+        # Calculate similarities against existing batch nodes
+        if neo4j_handler:
+            batch_similarities = await self._calculate_batch_similarities(chunk_embeddings, neo4j_handler)
+            
+            # Collect all batch similarities across chunks
+            all_batch_scores = {}
+            for chunk_similarities in batch_similarities:
+                for batch_id, score in chunk_similarities:
+                    if batch_id not in all_batch_scores:
+                        all_batch_scores[batch_id] = []
+                    all_batch_scores[batch_id].append(score)
+            
+            # Average scores per batch and sort
+            avg_batch_scores = [(bid, sum(scores)/len(scores)) for bid, scores in all_batch_scores.items()]
+            avg_batch_scores.sort(key=lambda x: x[1], reverse=True)
+            top_similar_batches = avg_batch_scores[:self.embedder_config.top_k_similar_batch]
+            
+            logger.debug(f"Overall top similar batches: {[(bid, f'{score:.3f}') for bid, score in top_similar_batches]}")
+            
+            # Log per-chunk similarities
+            for chunk_idx, similarities in enumerate(batch_similarities):
+                if similarities:
+                    top_similar = sorted(similarities, key=lambda x: x[1], reverse=True)[:self.embedder_config.top_k_similar_batch]
+                    logger.debug(f"Chunk {chunk_idx} top similar batches: {[(bid, f'{score:.3f}') for bid, score in top_similar]}")
+                else:
+                    logger.debug(f"Chunk {chunk_idx} top similar batches: none (no existing batches to compare)")
+        else:
+            logger.debug("Skipping batch similarity calculation (no neo4j_handler)")
+        
+        # LLM extraction: serial or parallel based on config
+        if not self.config.batch_llm_parallelism:
+            # Serial execution
+            logger.debug("Using serial LLM extraction with similarity (batch_llm_parallelism=false)")
+            all_triplets: List[Dict[str, Any]] = []
+            self.last_chunk_details = []
+            for i, chunk in enumerate(chunks):
+                try:
+                    result = await self._extract_chunk_triplets(chunk, i)
+                    logger.debug(f"Chunk {i} returned {len(result)} triplets")
+                    self.last_chunk_details.append({
+                        "chunk_index": i,
+                        "chunk_text": chunk,
+                        "triplets": result,
+                    })
+                    all_triplets.extend(result)
+                except Exception as e:
+                    logger.warning(f"Chunk {i} extraction failed: {e}")
+                    self.last_chunk_details.append({
+                        "chunk_index": i,
+                        "chunk_text": chunk,
+                        "triplets": [],
+                        "error": str(e),
+                    })
+            return all_triplets
+        
+        # Parallel LLM extraction (original logic)
+        semaphore = asyncio.Semaphore(self.config.parallel_count)
+        async def extract_with_semaphore(chunk_idx: int, chunk: str) -> List[Dict[str, Any]]:
+            async with semaphore:
+                return await self._extract_chunk_triplets(chunk, chunk_idx)
+        
+        llm_tasks = [extract_with_semaphore(i, chunk) for i, chunk in enumerate(chunks)]
+        
+        # Wait for LLM extractions to complete
+        logger.debug("Waiting for LLM extraction tasks...")
+        llm_results = await asyncio.gather(*llm_tasks, return_exceptions=True)
+        
+        # Process results (same as original method)
+        all_triplets: List[Dict[str, Any]] = []
+        self.last_chunk_details = []
+        for i, result in enumerate(llm_results):
+            if isinstance(result, Exception):
+                logger.warning(f"Chunk {i} extraction failed: {result}")
+                self.last_chunk_details.append({
+                    "chunk_index": i,
+                    "chunk_text": chunks[i],
+                    "triplets": [],
+                    "error": str(result),
+                })
+            else:
+                logger.debug(f"Chunk {i} returned {len(result)} triplets")
+                self.last_chunk_details.append({
+                    "chunk_index": i,
+                    "chunk_text": chunks[i],
+                    "triplets": result,
+                })
+                all_triplets.extend(result)
+
+        return all_triplets
+
+    async def _calculate_batch_similarities(self, chunk_embeddings, neo4j_handler) -> List[List[tuple[int, float]]]:
+        """Calculate similarity between chunks and existing batch nodes"""
+        import math
+        
+        # Query existing batch nodes and their embeddings
+        batch_embeddings = await self._get_batch_embeddings(neo4j_handler)
+        
+        similarities = []
+        for chunk_emb in chunk_embeddings:
+            if isinstance(chunk_emb, Exception):
+                similarities.append([])
+                continue
+            
+            chunk_similarities = []
+            for batch_id, batch_emb in batch_embeddings.items():
+                if batch_emb:
+                    # Calculate cosine similarity manually
+                    similarity = self._cosine_similarity(chunk_emb, batch_emb)
+                    chunk_similarities.append((batch_id, float(similarity)))
+            
+            # Sort by similarity and take top_k
+            chunk_similarities.sort(key=lambda x: x[1], reverse=True)
+            similarities.append(chunk_similarities[:self.embedder_config.top_k_chunk_with_batch_similarity])
+        
+        return similarities
+
+    def _cosine_similarity(self, vec1: List[float], vec2: List[float]) -> float:
+        """Calculate cosine similarity between two vectors"""
+        import math
+        
+        if len(vec1) != len(vec2):
+            return 0.0
+        
+        dot_product = sum(a * b for a, b in zip(vec1, vec2))
+        norm1 = math.sqrt(sum(a * a for a in vec1))
+        norm2 = math.sqrt(sum(b * b for b in vec2))
+        
+        if norm1 == 0 or norm2 == 0:
+            return 0.0
+        
+        return dot_product / (norm1 * norm2)
+
+    async def _get_batch_embeddings(self, neo4j_handler) -> Dict[int, List[float]]:
+        """Get embeddings for existing batch chunks in current graph"""
         try:
-            # Debug: log the chunk size before calling LLM
-            logger.debug(f"Calling LLM on chunk {chunk_idx} (~{len(chunk.split())} words)")
+            async with neo4j_handler.driver.session() as session:
+                result = await session.run("""
+                    MATCH (c:Chunk:GraphNode)
+                    WHERE c.graph_uuid = $graph_uuid AND c.batch_id IS NOT NULL AND c.embedding IS NOT NULL
+                    RETURN c.batch_id as batch_id, c.embedding as embedding
+                    LIMIT 1000
+                """, graph_uuid=neo4j_handler.run_uuid)
+                
+                batch_embeddings = {}
+                async for record in result:
+                    batch_id = record["batch_id"]
+                    embedding = record["embedding"]
+                    if isinstance(embedding, list):
+                        # Average embeddings per batch (or take first, or some aggregation)
+                        if batch_id not in batch_embeddings:
+                            batch_embeddings[batch_id] = embedding
+                        else:
+                            # Simple average for now
+                            current = batch_embeddings[batch_id]
+                            batch_embeddings[batch_id] = [(a + b) / 2 for a, b in zip(current, embedding)]
+                
+                return batch_embeddings
+        except Exception as e:
+            logger.warning(f"Failed to get batch embeddings: {e}")
+            return {}
 
-            # Format the prompt with the chunk content
-            prompt = self.prompt_template.format(input=chunk)
+    async def _extract_chunk_triplets(self, chunk_text: str, chunk_idx: int) -> List[Dict]:
+        """
+        Extracts triplets from a single chunk using the LLM with a STRICT TIMEOUT.
+        """
+        prompt = self.prompt_template.invoke({"input": chunk_text})
+        
+        # TIMEOUT CONFIG: 
+        # For local LLMs, 45-60s is usually safe. 
+        # If it takes longer, the server is likely stuck.
+        TIMEOUT_SECONDS = 45.0 
 
-            # Call the LLM directly
-            response = await self.chain.ainvoke([("user", prompt)])
-            llm_output = getattr(response, 'content', str(response)).strip()
+        try:
+            logger.debug(f"Calling LLM on chunk {chunk_idx} (~{len(chunk_text.split())} words)")
+            
+            # THE FIX: Wrap the API call in wait_for
+            response = await asyncio.wait_for(
+                self.chain.ainvoke(prompt),
+                timeout=TIMEOUT_SECONDS
+            )
 
             # Parse the pipe-delimited output
+            llm_output = getattr(response, 'content', str(response)).strip()
             triplets = self._parse_pipe_delimited_output(llm_output, chunk_idx)
-
             logger.debug(f"Extracted {len(triplets)} triplets from chunk {chunk_idx}")
             return triplets
 
+        except asyncio.TimeoutError:
+            logger.warning(f"⚠️ Chunk {chunk_idx} TIMED OUT after {TIMEOUT_SECONDS}s. Skipping.")
+            return [] # Return empty list so pipeline continues
+            
         except Exception as e:
-            logger.error(f"Chunk {chunk_idx} extraction error: {str(e)}")
+            logger.error(f"Error extracting from chunk {chunk_idx}: {e}")
             return []
 
     def _parse_pipe_delimited_output(self, llm_output: str, chunk_idx: int) -> List[Dict[str, Any]]:

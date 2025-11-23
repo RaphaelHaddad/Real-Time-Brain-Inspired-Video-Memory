@@ -24,6 +24,7 @@ class LLMInjectorConfig(BaseModel):
     temperature: float = 0.2
     top_p: float = 0.9
     max_tokens: int = 2048
+    subgraph_extraction_injection: bool = False
 
 class ChunkingConfig(BaseModel):
     """Configuration for hierarchical chunking strategy"""
@@ -36,6 +37,7 @@ class ChunkingConfig(BaseModel):
     enable_global_refinement: bool = True  # Merge & refine triplets
     refinement_max_tokens: int = 500  # Global refinement call limit (reduced)
     global_triplet_limit: int = 25  # Max triplets passed to refinement/final LLM
+    batch_llm_parallelism: bool = True  # Enable parallel LLM calls; set to false for serial execution
 
 class KGConfig(BaseModel):
     batch_size: int = Field(6, gt=0)
@@ -43,6 +45,13 @@ class KGConfig(BaseModel):
     embedding_endpoint: str
     embedding_model: str
     embedding_api_key: str
+
+class EmbedderConfig(BaseModel):
+    endpoint: str
+    api_key: str
+    model: str
+    top_k_chunk_with_batch_similarity: int = 3
+    top_k_similar_batch: int = 2
 
 class Neo4jConfig(BaseModel):
     uri: str = "bolt://localhost:7687"
@@ -78,6 +87,7 @@ class PipelineConfig(BaseModel):
     llm_injector: LLMInjectorConfig
     chunking: ChunkingConfig = ChunkingConfig()
     kg: KGConfig
+    embedder: EmbedderConfig
     neo4j: Neo4jConfig
     retrieval: RetrievalConfig
     benchmark_llm: Optional[BenchmarkLLMConfig] = None

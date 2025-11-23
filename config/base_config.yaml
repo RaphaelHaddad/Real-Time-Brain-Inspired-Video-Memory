@@ -20,17 +20,19 @@ llm_injector:
   temperature: 0.2
   top_p: 0.9
   max_tokens: 8192
+  subgraph_extraction_injection: true
 
 chunking:
   enabled: true
-  chunk_size: 320
-  chunk_overlap: 64
+  chunk_size: 300
+  chunk_overlap: 32
   max_triplets_per_chunk: 6
   use_sentence_boundaries: true
-  parallel_count: 4
+  parallel_count: 2
   enable_global_refinement: true
   refinement_max_tokens: 2000
   global_triplet_limit: 25
+  batch_llm_parallelism: true
 
 kg:
   batch_size: 3
@@ -38,6 +40,13 @@ kg:
   embedding_endpoint: "http://localhost:8071/v1"
   embedding_model: "qwen-embedding"
   embedding_api_key: ""
+
+embedder:
+  endpoint: "http://localhost:8071/v1"
+  api_key: ""
+  model: "qwen-embedding"
+  top_k_chunk_with_batch_similarity: 3
+  top_k_similar_batch: 2
 
 neo4j:
   uri: "bolt://localhost:7687"

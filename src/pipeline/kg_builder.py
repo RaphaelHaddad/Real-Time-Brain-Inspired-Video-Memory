@@ -41,7 +41,7 @@ class KGBuilder:
                 model=config.llm_injector.model_name,
                 temperature=0.2,
             )
-            self.pre_llm_injector = PreLLMInjector(pre_llm, config.chunking)
+            self.pre_llm_injector = PreLLMInjector(pre_llm, config.chunking, config.embedder, config.llm_injector)
 
             if config.chunking.enable_global_refinement:
                 self.global_refiner = GlobalRefiner(config.llm_injector, config.chunking)
@@ -136,7 +136,7 @@ class KGBuilder:
                 if self.pre_llm_injector:
                     pre_start = time.perf_counter()
                     pre_triplets = await self.pre_llm_injector.extract_local_triplets(
-                        aggregated_content, network_info
+                        aggregated_content, network_info, self.neo4j_handler
                     )
                     pre_time = time.perf_counter() - pre_start
                     logger.info(f"Pre-extraction: {len(pre_triplets)} triplets in {pre_time:.2f}s")
