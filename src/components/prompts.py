@@ -59,6 +59,54 @@ EXAMPLE:
 JSON OUTPUT:
 """
 
+# OPTIMIZATION 3: Instruction-Based Global Refinement
+# Why: Enables advanced operations for smarter graph building with subgraph context.
+# Operations: new_triplets, inter_chunk_relations, merge_instructions, prune_instructions
+LLM_INJECTOR_INSTRUCTION_PROMPT_TEMPLATE = """
+Perform advanced knowledge graph refinement by strictly executing the required operations.
+
+RULE: If CONTEXT SUBGRAPHS is empty or says "No subgraph context available", set "inter_chunk_relations", "merge_instructions", and "prune_instructions" to []. ONLY add to "new_triplets" from NEW CANDIDATES. DO NOT invent IDs, entities, or relations—stick to provided data.
+
+### CONTEXT SUBGRAPHS (Relevant Existing Knowledge):
+The following entities and relationships already exist in the graph. The IDs (e.g., '123_45') allow you to reference specific entities for linking and merging.
+{subgraph_context}
+
+### NEW CANDIDATES (From Current Extraction Batch):
+{pre_extracted_triplets}
+
+### STRICT OUTPUT FORMAT:
+You MUST return a single JSON object containing these four keys.
+The format for each key is STRICTLY defined below:
+
+1. "new_triplets": List of new facts NOT present in the CONTEXT.
+   - Format: [[Head, Relation, Tail, [SourceIndices]], ...]
+2. "inter_chunk_relations": List of new relations connecting entities from NEW CANDIDATES to entities in CONTEXT SUBGRAPHS.
+   - Format: [[NewHead, Relation, ExistingTail, [SourceIndices]], ...]
+3. "merge_instructions": List of instructions to merge local duplicates into existing entities.
+   - Format: [{{"local": LocalName, "existing": ExistingName, "existing_id": ExistingID}}, ...]
+4. "prune_instructions": List of instructions to remove noise or refuted facts from CONTEXT.
+   - Format: [{{"head": HeadName, "relation": RelationName, "tail": TailName, "source_id": SourceID}}, ...]
+
+### EXAMPLES:
+
+// Merging "Man" (new) into "Person" (existing, ID 42_1)
+"merge_instructions": [
+  {{"local": "Man", "existing": "Person", "existing_id": "42_1"}}
+]
+
+// Linking a new "Document" (new) to a pre-existing "Lab Table" (ID 1_3)
+"inter_chunk_relations": [
+  ["Document", "placed_on", "Lab Table", [0, 1]]
+]
+
+// Pruning an outdated relation (Person | Wore | Sweater from chunk 5_2)
+"prune_instructions": [
+  {{"head": "Person", "relation": "Wore", "tail": "Sweater", "source_id": "5_2"}}
+]
+
+JSON OUTPUT:
+"""
+
 # Benchmark prompts remain largely the same as they rely on natural language generation
 BENCHMARK_ANSWER_PROMPT_TEMPLATE = """
 Answer the question based ONLY on the video context provided.
@@ -88,6 +136,9 @@ def build_pre_llm_prompt_template(max_triplets: int) -> ChatPromptTemplate:
 
 def get_llm_injector_prompt_template() -> ChatPromptTemplate:
     return ChatPromptTemplate.from_template(LLM_INJECTOR_PROMPT_TEMPLATE)
+
+def get_llm_injector_instruction_prompt_template() -> ChatPromptTemplate:
+    return ChatPromptTemplate.from_template(LLM_INJECTOR_INSTRUCTION_PROMPT_TEMPLATE)
 
 def build_benchmark_answer_prompt() -> ChatPromptTemplate:
     return ChatPromptTemplate.from_template(BENCHMARK_ANSWER_PROMPT_TEMPLATE)

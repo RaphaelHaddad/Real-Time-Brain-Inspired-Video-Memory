@@ -17,7 +17,7 @@ llm_injector:
   endpoint: "http://localhost:8078/v1"
   api_key: ""
   model_name: "qwen-vlm"
-  temperature: 0.2
+  temperature: 0.05
   top_p: 0.9
   max_tokens: 8192
   subgraph_extraction_injection: true

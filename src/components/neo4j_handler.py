@@ -215,31 +215,49 @@ class Neo4jHandler:
                     )
                 
                 # Link entities to this chunk
-                # source_chunks in triplets are now IDs (strings)
+                # source_chunks in triplets may be full chunk IDs (uuid_batch_chunk) or short ids (batch_chunk)
                 for triplet in triplets:
-                    source_chunks = triplet.get('source_chunks', [])
-                    if chunk_id in source_chunks:
-                        head = triplet.get('head', '')
-                        tail = triplet.get('tail', '')
-                        
-                        if head:
-                            await session.run(
-                                """
-                                MATCH (e:Entity {name: $entity, graph_uuid: $graph_uuid})
-                                MATCH (c:Chunk {id: $chunk_id, graph_uuid: $graph_uuid})
-                                MERGE (e)-[:FROM_CHUNK]->(c)
-                                """,
-                                entity=head, chunk_id=chunk_id, graph_uuid=self.run_uuid
-                            )
-                        if tail:
-                            await session.run(
-                                """
-                                MATCH (e:Entity {name: $entity, graph_uuid: $graph_uuid})
-                                MATCH (c:Chunk {id: $chunk_id, graph_uuid: $graph_uuid})
-                                MERGE (e)-[:FROM_CHUNK]->(c)
-                                """,
-                                entity=tail, chunk_id=chunk_id, graph_uuid=self.run_uuid
-                            )
+                    source_chunks = triplet.get('source_chunks', []) or []
+                    # Normalize to strings for comparison
+                    source_chunks_str = [str(s) for s in source_chunks]
+
+                    # Derive short id for the current chunk (e.g., '0_3' from '..._0_3')
+                    parts = str(chunk_id).split('_')
+                    short_id = None
+                    if len(parts) >= 2:
+                        short_id = f"{parts[-2]}_{parts[-1]}"
+
+                    # Match if either the full chunk_id or the short form appears in the triplet's source list
+                    matched = False
+                    if chunk_id in source_chunks_str:
+                        matched = True
+                    elif short_id and short_id in source_chunks_str:
+                        matched = True
+
+                    if not matched:
+                        continue
+
+                    head = triplet.get('head', '')
+                    tail = triplet.get('tail', '')
+
+                    if head:
+                        await session.run(
+                            """
+                            MATCH (e:Entity {name: $entity, graph_uuid: $graph_uuid})
+                            MATCH (c:Chunk {id: $chunk_id, graph_uuid: $graph_uuid})
+                            MERGE (e)-[:FROM_CHUNK]->(c)
+                            """,
+                            entity=head, chunk_id=chunk_id, graph_uuid=self.run_uuid
+                        )
+                    if tail:
+                        await session.run(
+                            """
+                            MATCH (e:Entity {name: $entity, graph_uuid: $graph_uuid})
+                            MATCH (c:Chunk {id: $chunk_id, graph_uuid: $graph_uuid})
+                            MERGE (e)-[:FROM_CHUNK]->(c)
+                            """,
+                            entity=tail, chunk_id=chunk_id, graph_uuid=self.run_uuid
+                        )
 
             # Update entity source_chunk_ids
             try:

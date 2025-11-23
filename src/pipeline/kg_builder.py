@@ -136,7 +136,7 @@ class KGBuilder:
                 text_chunks = []
                 if self.pre_llm_injector:
                     pre_start = time.perf_counter()
-                    pre_triplets, text_chunks = await self.pre_llm_injector.extract_local_triplets(
+                    pre_triplets, text_chunks, subgraphs = await self.pre_llm_injector.extract_local_triplets(
                         aggregated_content, network_info, self.neo4j_handler, batch_idx, self.run_uuid
                     )
                     pre_time = time.perf_counter() - pre_start
@@ -164,9 +164,16 @@ class KGBuilder:
                 # Step 2: Global refinement (if enabled)
                 if self.global_refiner and pre_triplets:
                     refine_start = time.perf_counter()
-                    pre_triplets = await self.global_refiner.refine_triplets(
-                        pre_triplets, network_info, global_limit
-                    )
+                    if self.config.llm_injector.subgraph_extraction_injection:
+                        # Use instruction-based refinement with subgraphs
+                        pre_triplets = await self.global_refiner.refine_triplets_instruction_based(
+                            pre_triplets, subgraphs, global_limit
+                        )
+                    else:
+                        # Use legacy refinement
+                        pre_triplets = await self.global_refiner.refine_triplets(
+                            pre_triplets, network_info, global_limit
+                        )
                     refine_time = time.perf_counter() - refine_start
                     logger.info(f"Global refinement: {len(pre_triplets)} triplets in {refine_time:.2f}s")
                     # Use refined triplets directly (skip redundant final LLM call)

@@ -60,7 +60,7 @@ class PreLLMInjector:
 
     async def extract_local_triplets(
         self, content: str, network_info: str = "", neo4j_handler = None, batch_idx: int = 0, run_uuid: str = ""
-    ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, str]]:
         """
         Extract triplets from content using hierarchical chunking + local extraction
 
@@ -75,6 +75,7 @@ class PreLLMInjector:
             Tuple of:
             - List of triplet dicts with 'head', 'relation', 'tail', 'source_chunks'
             - List of chunk dicts with 'id', 'content', 'embedding' (if available)
+            - Dict of subgraph strings keyed by chunk_id (for similar chunks)
         """
         try:
             # Split content into manageable chunks
@@ -98,14 +99,15 @@ class PreLLMInjector:
 
             if not chunks_text:
                 logger.warning("No chunks produced from content")
-                return [], []
+                return [], [], {}
 
             # Extract triplets from each chunk in parallel
             if self.llm_injector_config and self.llm_injector_config.subgraph_extraction_injection:
-                triplets, updated_chunk_data = await self._parallel_chunk_extraction_with_similarity(chunk_data, neo4j_handler)
+                triplets, updated_chunk_data, subgraphs = await self._parallel_chunk_extraction_with_similarity(chunk_data, neo4j_handler)
             else:
                 triplets = await self._parallel_chunk_extraction(chunk_data)
                 updated_chunk_data = chunk_data
+                subgraphs = {}
 
             # Deduplicate at local level (preserves source_chunks)
             triplets = self._deduplicate_triplets(triplets)
@@ -113,11 +115,11 @@ class PreLLMInjector:
             logger.info(
                 f"Extracted {len(triplets)} local triplets from {len(chunks_text)} chunks"
             )
-            return triplets, updated_chunk_data
+            return triplets, updated_chunk_data, subgraphs
 
         except Exception as e:
             logger.error(f"Pre-LLM extraction failed: {str(e)}")
-            return [], []
+            return [], [], {}
 
     async def _parallel_chunk_extraction(
         self, chunk_data: List[Dict[str, Any]]
@@ -192,7 +194,7 @@ class PreLLMInjector:
 
         return all_triplets
 
-    async def _parallel_chunk_extraction_with_similarity(self, chunk_data: List[Dict[str, Any]], neo4j_handler) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    async def _parallel_chunk_extraction_with_similarity(self, chunk_data: List[Dict[str, Any]], neo4j_handler) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, str]]:
         """Extract triplets with subgraph similarity calculation"""
         import asyncio
         from langchain_openai import OpenAIEmbeddings
@@ -225,6 +227,7 @@ class PreLLMInjector:
                 logger.warning(f"Embedding failed for chunk {i}: {emb}")
 
         # Calculate similarities against existing batch nodes
+        subgraphs = {}
         if neo4j_handler:
             batch_similarities = await self._calculate_batch_similarities(chunk_embeddings, neo4j_handler)
             
@@ -256,6 +259,7 @@ class PreLLMInjector:
                         subg = await self._extract_subgraph_for_chunk_id(chunk_id, neo4j_handler)
                         if subg:
                             logger.debug(f"Subgraph for {chunk_id}: {subg}")
+                            subgraphs[chunk_id] = subg
 
                 extract_tasks = [extract_and_log(cid) for cid, _ in top_similar_chunks]
                 # Fire-and-forget - but gather to ensure logs appear during this run
@@ -299,7 +303,7 @@ class PreLLMInjector:
                         "triplets": [],
                         "error": str(e),
                     })
-            return all_triplets, chunk_data
+            return all_triplets, chunk_data, subgraphs
         
         # Parallel LLM extraction (original logic)
         semaphore = asyncio.Semaphore(self.config.parallel_count)
@@ -336,7 +340,7 @@ class PreLLMInjector:
                 })
                 all_triplets.extend(result)
 
-        return all_triplets, chunk_data
+        return all_triplets, chunk_data, subgraphs
 
     async def _calculate_batch_similarities(self, chunk_embeddings, neo4j_handler) -> List[List[tuple[str, float]]]:
         """Calculate similarity between new chunks and existing Chunk nodes (per VLM inference)
@@ -412,13 +416,14 @@ class PreLLMInjector:
         if len(parts) >= 3:
             return f"{parts[-2]}_{parts[-1]}"
         return "?"
+
+    async def _extract_subgraph_for_chunk_id(self, chunk_id: str, neo4j_handler) -> str:
         """Extract a concise, LLM-friendly subgraph surrounding the given chunk_id.
 
         The subgraph includes:
         - All Entity nodes directly connected to the given Chunk (via FROM_CHUNK)
         - All relationships where at least one endpoint is in that set of Entity nodes
-        - For relationships with only one endpoint in the set, the other endpoint is included as an external linked entity,
-          with its source_chunk_ids listed to indicate VLm provenance.
+        - All entities are shown with their source chunk IDs in format (EntityName / ID: batch_chunk)
 
         Returns a compact string representation, or an empty string if nothing found.
         """
@@ -477,18 +482,15 @@ class PreLLMInjector:
                 # Relationships: head-rel->tail
                 rel_parts = []
                 for head, rel, tail, head_chunks, tail_chunks in relations:
-                    # Mark external entities with * and short ID
-                    head_marker = ""
-                    if chunk_id not in head_chunks:
-                        short_id = self._get_short_chunk_id(head_chunks[0]) if head_chunks else "?"
-                        head_marker = f"*{short_id}"
+                    # Get short ID for head entity
+                    head_short_id = self._get_short_chunk_id(head_chunks[0]) if head_chunks else "?"
+                    head_formatted = f"({head} / ID: {head_short_id})"
                     
-                    tail_marker = ""
-                    if chunk_id not in tail_chunks:
-                        short_id = self._get_short_chunk_id(tail_chunks[0]) if tail_chunks else "?"
-                        tail_marker = f"*{short_id}"
+                    # Get short ID for tail entity  
+                    tail_short_id = self._get_short_chunk_id(tail_chunks[0]) if tail_chunks else "?"
+                    tail_formatted = f"({tail} / ID: {tail_short_id})"
                     
-                    rel_parts.append(f"({head}{head_marker})-[{rel}]->({tail}{tail_marker})")
+                    rel_parts.append(f"{head_formatted}-[{rel}]->{tail_formatted}")
 
                 # Build final short string: Subgraph only
                 rels_str = ", ".join(rel_parts)
