@@ -1,0 +1,25 @@
+# List of JSON metrics files to compare (order matters for labels)
+json_files:
+  - path: metrics/injection_9134a88f-b727-446e-a355-b7ca3d542986_batch_metrics_kg.json
+    label: run_with_injection
+  - path: metrics/non_injection_5f299dbf-75a3-4525-beae-1273408ee632_batch_metrics_kg.json
+    label: run_without_injection
+
+# Metrics to include in the plots. Set to true to enable.
+metrics:
+  node_count: true
+  relationship_count: true
+  density: true
+  avg_degree: true
+  diameter_estimate: false
+  clustering_coefficient: true
+  pagerank_top10_percent: false
+  louvain_communities: false
+  louvain_modularity: true
+  label_entropy: true
+
+plot:
+  title: "Metrics comparison"
+  figsize: [12, 8]
+  save_path: outputs/metrics_comparison.png
+  show: false

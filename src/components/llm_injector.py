@@ -79,16 +79,21 @@ class LLMInjector:
                     )
                 
                 logger.debug(f"Refining {len(capped_triplets)} pre-extracted triplets")
+                # Provide max_new_triplets constraint to the prompt template when available
+                max_new = getattr(self.chunking_config, 'max_new_triplets', 20)
                 prompt = self.prompt_template.format(
                     network_info=network_info,
-                    pre_extracted_triplets=json.dumps(capped_triplets, indent=None)  # Compact
+                    pre_extracted_triplets=json.dumps(capped_triplets, indent=None),  # Compact
+                    max_new_triplets=max_new,
                 )
             else:
                 # Explicitly handle None (should not occur when chunking enabled)
                 logger.warning("No pre-extracted triplets provided; proceeding with empty candidate set.")
+                max_new = getattr(self.chunking_config, 'max_new_triplets', 20)
                 prompt = self.prompt_template.format(
                     network_info=network_info,
-                    pre_extracted_triplets="[]"
+                    pre_extracted_triplets="[]",
+                    max_new_triplets=max_new,
                 )
 
             prompt_words = len(prompt.split())

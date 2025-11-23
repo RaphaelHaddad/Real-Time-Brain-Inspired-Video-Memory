@@ -16,3 +16,4 @@ rapidfuzz>=2.0.0
 json-repair>=0.0.0
 networkx>=3.0
 scipy>=1.10.0
+matplotlib>=3.0

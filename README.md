@@ -280,6 +280,16 @@ This two-step approach keeps the final prompt small (avoiding token overflow),
 speeds up extraction by parallelizing chunk-level calls, and gives you a clear
 audit trail of how triplets were produced.
 
+subgraph_extraction_injection (brief):
+- Purpose: when injecting a batch, the pipeline first extracts a small, relevant
+  "subgraph" from the existing Neo4j store that is semantically related to the
+  incoming batch. This subgraph is sent to the global refiner so the LLM can
+  (a) avoid duplicating existing facts, (b) produce precise inter-chunk links,
+  and (c) generate safe merge/prune instructions tied to existing node IDs.
+- Behavior: if no relevant subgraph is found, the refiner is instructed *not*
+  to propose merges/links/prunes and to only emit new triplets. This reduces
+  hallucinated merges and keeps injections safe.
+
 Prompts used by both stages live in `src/components/prompts.py` so you can
 edit them in one place. The file exposes builders that preserve the placeholder
 variables the code relies on (for example: `{input}`, `{max_triplets}`,
@@ -403,12 +413,30 @@ The output will be a JSON file with the following consistent format:
 <summary><strong>📊 Metrics and Monitoring</strong></summary>
 
 The system tracks comprehensive metrics including:
-- Processing times for each pipeline stage
-- API call latencies
-- Graph construction statistics
-- Network science metrics (via ACS Automata)
 
 Metrics are saved to `metrics/` directory in JSON format.
+
+### Plotting batch metrics
+
+Quick tutorial to generate comparison plots from per-batch JSON metrics:
+
+1. Install plotting deps (if not already):
+
+```bash
+pip install matplotlib pyyaml
+```
+
+2. Edit `config/plot_metrics.yaml` to list the JSON metric files you want to compare and toggle metrics on/off.
+
+3. Run the plotting script from the repo root:
+
+```bash
+python3 scripts/plot/plot_metrics.py --config config/plot_metrics.yaml
+```
+
+4. The combined plot is saved to the path defined under `plot.save_path` in the config (default: `outputs/metrics_comparison.png`).
+
+This script creates one subplot per selected metric and draws one curve per JSON file so you can visually compare runs side-by-side.
 
 </details>
 

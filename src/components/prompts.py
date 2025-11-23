@@ -50,6 +50,9 @@ OUTPUT FORMAT:
 Return a JSON object with a single key "triplets".
 The value must be a list of lists, where each inner list is: [Head, Relation, Tail, [source_indices]].
 
+CONSTRAINTS:
+Do not output more than {max_new_triplets} triplets in the top-level "triplets" list.
+
 EXAMPLE:
 {{"triplets": [
   ["Person", "holds", "Smartphone", [0, 1]],
