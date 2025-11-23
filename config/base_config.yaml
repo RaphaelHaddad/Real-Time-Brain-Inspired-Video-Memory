@@ -24,15 +24,15 @@ llm_injector:
 
 chunking:
   enabled: true
-  chunk_size: 300
-  chunk_overlap: 32
+  chunk_size: 296
+  chunk_overlap: 16
   max_triplets_per_chunk: 6
   use_sentence_boundaries: true
   parallel_count: 2
   enable_global_refinement: true
   refinement_max_tokens: 2000
   global_triplet_limit: 25
-  batch_llm_parallelism: true
+  batch_llm_parallelism: false
 
 kg:
   batch_size: 3

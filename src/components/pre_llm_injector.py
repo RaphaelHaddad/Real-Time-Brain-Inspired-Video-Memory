@@ -49,56 +49,83 @@ class PreLLMInjector:
             f"subgraph_extraction={llm_injector_config.subgraph_extraction_injection if llm_injector_config else False}"
         )
 
+    def _truncate_text(self, text: str, max_words: int = 25) -> str:
+        """Return a truncated version of the text using at most max_words words."""
+        if not text:
+            return ""
+        words = text.split()
+        if len(words) <= max_words:
+            return text
+        return " ".join(words[:max_words]) + "..."
+
     async def extract_local_triplets(
-        self, content: str, network_info: str = "", neo4j_handler = None
-    ) -> List[Dict[str, Any]]:
+        self, content: str, network_info: str = "", neo4j_handler = None, batch_idx: int = 0, run_uuid: str = ""
+    ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """
         Extract triplets from content using hierarchical chunking + local extraction
 
         Args:
             content: Aggregated VLM output text
             network_info: Optional graph context (unused in local extraction)
+            neo4j_handler: Handler for graph operations (similarity search)
+            batch_idx: Current batch index
+            run_uuid: Unique identifier for the run
 
         Returns:
-            List of triplet dicts with 'head', 'relation', 'tail', 'source_chunks'
+            Tuple of:
+            - List of triplet dicts with 'head', 'relation', 'tail', 'source_chunks'
+            - List of chunk dicts with 'id', 'content', 'embedding' (if available)
         """
         try:
             # Split content into manageable chunks
-            chunks = self.splitter.split_text(content)
+            chunks_text = self.splitter.split_text(content)
             logger.debug(
-                f"Split content into {len(chunks)} chunks (chunk_size={self.config.chunk_size}, overlap={self.config.chunk_overlap})"
+                f"Split content into {len(chunks_text)} chunks (chunk_size={self.config.chunk_size}, overlap={self.config.chunk_overlap})"
             )
 
-            # Log full content of chunks to aid debugging
-            for i, c in enumerate(chunks):
-                logger.debug(f"Chunk[{i}] ~{len(c.split())} words, full content: {c}")
+            # Generate IDs for chunks
+            chunk_data = []
+            for i, text in enumerate(chunks_text):
+                chunk_id = f"{run_uuid}_{batch_idx}_{i}" if run_uuid else f"chunk_{batch_idx}_{i}"
+                chunk_data.append({
+                    "id": chunk_id,
+                    "content": text,
+                    "index": i,
+                    "embedding": None
+                })
+                truncated = self._truncate_text(text, max_words=25)
+                logger.debug(f"Chunk[{i}] ID={chunk_id} ~{len(text.split())} words, content: {truncated}")
 
-            if not chunks:
+            if not chunks_text:
                 logger.warning("No chunks produced from content")
-                return []
+                return [], []
 
             # Extract triplets from each chunk in parallel
             if self.llm_injector_config and self.llm_injector_config.subgraph_extraction_injection:
-                triplets = await self._parallel_chunk_extraction_with_similarity(chunks, neo4j_handler)
+                triplets, updated_chunk_data = await self._parallel_chunk_extraction_with_similarity(chunk_data, neo4j_handler)
             else:
-                triplets = await self._parallel_chunk_extraction(chunks)
+                triplets = await self._parallel_chunk_extraction(chunk_data)
+                updated_chunk_data = chunk_data
 
             # Deduplicate at local level (preserves source_chunks)
             triplets = self._deduplicate_triplets(triplets)
 
             logger.info(
-                f"Extracted {len(triplets)} local triplets from {len(chunks)} chunks"
+                f"Extracted {len(triplets)} local triplets from {len(chunks_text)} chunks"
             )
-            return triplets
+            return triplets, updated_chunk_data
 
         except Exception as e:
             logger.error(f"Pre-LLM extraction failed: {str(e)}")
-            return []
+            return [], []
 
     async def _parallel_chunk_extraction(
-        self, chunks: List[str]
+        self, chunk_data: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
-        """Extract triplets from multiple chunks in parallel or serially based on config, tracking chunk indices"""
+        """Extract triplets from multiple chunks in parallel or serially based on config"""
+        chunks = [c["content"] for c in chunk_data]
+        chunk_ids = [c["id"] for c in chunk_data]
+        
         if not self.config.batch_llm_parallelism:
             # Serial execution
             logger.debug("Using serial LLM extraction (batch_llm_parallelism=false)")
@@ -106,10 +133,11 @@ class PreLLMInjector:
             self.last_chunk_details = []
             for i, chunk in enumerate(chunks):
                 try:
-                    result = await self._extract_chunk_triplets(chunk, i)
+                    result = await self._extract_chunk_triplets(chunk, i, chunk_ids[i])
                     logger.debug(f"Chunk {i} returned {len(result)} triplets")
                     self.last_chunk_details.append({
                         "chunk_index": i,
+                        "chunk_id": chunk_ids[i],
                         "chunk_text": chunk,
                         "triplets": result,
                     })
@@ -118,6 +146,7 @@ class PreLLMInjector:
                     logger.warning(f"Chunk {i} extraction failed: {e}")
                     self.last_chunk_details.append({
                         "chunk_index": i,
+                        "chunk_id": chunk_ids[i],
                         "chunk_text": chunk,
                         "triplets": [],
                         "error": str(e),
@@ -128,12 +157,12 @@ class PreLLMInjector:
         # Limit concurrency to avoid overwhelming the LLM
         semaphore = asyncio.Semaphore(self.config.parallel_count)
 
-        async def extract_with_semaphore(chunk_idx: int, chunk: str) -> List[Dict[str, Any]]:
+        async def extract_with_semaphore(chunk_idx: int, chunk: str, chunk_id: str) -> List[Dict[str, Any]]:
             async with semaphore:
-                return await self._extract_chunk_triplets(chunk, chunk_idx)
+                return await self._extract_chunk_triplets(chunk, chunk_idx, chunk_id)
 
         # Launch parallel tasks with chunk indices
-        tasks = [extract_with_semaphore(i, chunk) for i, chunk in enumerate(chunks)]
+        tasks = [extract_with_semaphore(i, chunk, chunk_ids[i]) for i, chunk in enumerate(chunks)]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         # Flatten results and filter errors
@@ -146,6 +175,7 @@ class PreLLMInjector:
                 # Record chunk text even if failed
                 self.last_chunk_details.append({
                     "chunk_index": i,
+                    "chunk_id": chunk_ids[i],
                     "chunk_text": chunks[i],
                     "triplets": [],
                     "error": str(result),
@@ -154,6 +184,7 @@ class PreLLMInjector:
                 logger.debug(f"Chunk {i} returned {len(result)} triplets")
                 self.last_chunk_details.append({
                     "chunk_index": i,
+                    "chunk_id": chunk_ids[i],
                     "chunk_text": chunks[i],
                     "triplets": result,
                 })
@@ -161,11 +192,14 @@ class PreLLMInjector:
 
         return all_triplets
 
-    async def _parallel_chunk_extraction_with_similarity(self, chunks: List[str], neo4j_handler) -> List[Dict[str, Any]]:
+    async def _parallel_chunk_extraction_with_similarity(self, chunk_data: List[Dict[str, Any]], neo4j_handler) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """Extract triplets with subgraph similarity calculation"""
         import asyncio
         from langchain_openai import OpenAIEmbeddings
         
+        chunks = [c["content"] for c in chunk_data]
+        chunk_ids = [c["id"] for c in chunk_data]
+
         # Initialize embedder
         embedder = OpenAIEmbeddings(
             base_url=self.embedder_config.endpoint,
@@ -183,32 +217,59 @@ class PreLLMInjector:
         logger.debug("Starting chunk embedding tasks...")
         chunk_embeddings = await asyncio.gather(*embedding_tasks, return_exceptions=True)
         
+        # Update chunk_data with embeddings
+        for i, emb in enumerate(chunk_embeddings):
+            if not isinstance(emb, Exception):
+                chunk_data[i]["embedding"] = emb
+            else:
+                logger.warning(f"Embedding failed for chunk {i}: {emb}")
+
         # Calculate similarities against existing batch nodes
         if neo4j_handler:
             batch_similarities = await self._calculate_batch_similarities(chunk_embeddings, neo4j_handler)
             
-            # Collect all batch similarities across chunks
-            all_batch_scores = {}
+            # Concatenate per-chunk similarity lists, deduplicate by chunk id taking the MAX score,
+            # then sort by score and take the top_k_similar_batch elements.
+            # This produces a final, unique list of (chunk_id, score) as requested.
+            final_scores = {}
             for chunk_similarities in batch_similarities:
-                for batch_id, score in chunk_similarities:
-                    if batch_id not in all_batch_scores:
-                        all_batch_scores[batch_id] = []
-                    all_batch_scores[batch_id].append(score)
-            
-            # Average scores per batch and sort
-            avg_batch_scores = [(bid, sum(scores)/len(scores)) for bid, scores in all_batch_scores.items()]
-            avg_batch_scores.sort(key=lambda x: x[1], reverse=True)
-            top_similar_batches = avg_batch_scores[:self.embedder_config.top_k_similar_batch]
-            
-            logger.debug(f"Overall top similar batches: {[(bid, f'{score:.3f}') for bid, score in top_similar_batches]}")
+                for chunk_id, score in chunk_similarities:
+                    # keep the highest score observed for this chunk_id across all new chunks
+                    if chunk_id not in final_scores or score > final_scores[chunk_id]:
+                        final_scores[chunk_id] = score
+
+            # Convert to list and sort by descending score
+            final_score_list = sorted(final_scores.items(), key=lambda x: x[1], reverse=True)
+
+            # Keep only the top-k configured similar batches/chunks
+            top_similar_chunks = final_score_list[: self.embedder_config.top_k_similar_batch]
+
+            # Log the final deduplicated sorted list
+            logger.debug(f"FINAL SIMILARITY LIST : {[(cid, f'{score:.3f}') for cid, score in top_similar_chunks]}")
+
+            # Spawn parallel subgraph extraction tasks for each top similar chunk id
+            try:
+                sem = asyncio.Semaphore(self.config.parallel_count)
+
+                async def extract_and_log(chunk_id: str):
+                    async with sem:
+                        subg = await self._extract_subgraph_for_chunk_id(chunk_id, neo4j_handler)
+                        if subg:
+                            logger.debug(f"Subgraph for {chunk_id}: {subg}")
+
+                extract_tasks = [extract_and_log(cid) for cid, _ in top_similar_chunks]
+                # Fire-and-forget - but gather to ensure logs appear during this run
+                await asyncio.gather(*extract_tasks, return_exceptions=True)
+            except Exception as e:
+                logger.warning(f"Failed to extract subgraphs for similar chunks: {e}")
             
             # Log per-chunk similarities
             for chunk_idx, similarities in enumerate(batch_similarities):
                 if similarities:
                     top_similar = sorted(similarities, key=lambda x: x[1], reverse=True)[:self.embedder_config.top_k_similar_batch]
-                    logger.debug(f"Chunk {chunk_idx} top similar batches: {[(bid, f'{score:.3f}') for bid, score in top_similar]}")
+                    logger.debug(f"Chunk {chunk_idx} top similar chunks: {[(cid, f'{score:.3f}') for cid, score in top_similar]}")
                 else:
-                    logger.debug(f"Chunk {chunk_idx} top similar batches: none (no existing batches to compare)")
+                    logger.debug(f"Chunk {chunk_idx} top similar chunks: none (no existing chunks to compare)")
         else:
             logger.debug("Skipping batch similarity calculation (no neo4j_handler)")
         
@@ -220,10 +281,11 @@ class PreLLMInjector:
             self.last_chunk_details = []
             for i, chunk in enumerate(chunks):
                 try:
-                    result = await self._extract_chunk_triplets(chunk, i)
+                    result = await self._extract_chunk_triplets(chunk, i, chunk_ids[i])
                     logger.debug(f"Chunk {i} returned {len(result)} triplets")
                     self.last_chunk_details.append({
                         "chunk_index": i,
+                        "chunk_id": chunk_ids[i],
                         "chunk_text": chunk,
                         "triplets": result,
                     })
@@ -232,19 +294,20 @@ class PreLLMInjector:
                     logger.warning(f"Chunk {i} extraction failed: {e}")
                     self.last_chunk_details.append({
                         "chunk_index": i,
+                        "chunk_id": chunk_ids[i],
                         "chunk_text": chunk,
                         "triplets": [],
                         "error": str(e),
                     })
-            return all_triplets
+            return all_triplets, chunk_data
         
         # Parallel LLM extraction (original logic)
         semaphore = asyncio.Semaphore(self.config.parallel_count)
-        async def extract_with_semaphore(chunk_idx: int, chunk: str) -> List[Dict[str, Any]]:
+        async def extract_with_semaphore(chunk_idx: int, chunk: str, chunk_id: str) -> List[Dict[str, Any]]:
             async with semaphore:
-                return await self._extract_chunk_triplets(chunk, chunk_idx)
+                return await self._extract_chunk_triplets(chunk, chunk_idx, chunk_id)
         
-        llm_tasks = [extract_with_semaphore(i, chunk) for i, chunk in enumerate(chunks)]
+        llm_tasks = [extract_with_semaphore(i, chunk, chunk_ids[i]) for i, chunk in enumerate(chunks)]
         
         # Wait for LLM extractions to complete
         logger.debug("Waiting for LLM extraction tasks...")
@@ -258,6 +321,7 @@ class PreLLMInjector:
                 logger.warning(f"Chunk {i} extraction failed: {result}")
                 self.last_chunk_details.append({
                     "chunk_index": i,
+                    "chunk_id": chunk_ids[i],
                     "chunk_text": chunks[i],
                     "triplets": [],
                     "error": str(result),
@@ -266,19 +330,22 @@ class PreLLMInjector:
                 logger.debug(f"Chunk {i} returned {len(result)} triplets")
                 self.last_chunk_details.append({
                     "chunk_index": i,
+                    "chunk_id": chunk_ids[i],
                     "chunk_text": chunks[i],
                     "triplets": result,
                 })
                 all_triplets.extend(result)
 
-        return all_triplets
+        return all_triplets, chunk_data
 
-    async def _calculate_batch_similarities(self, chunk_embeddings, neo4j_handler) -> List[List[tuple[int, float]]]:
-        """Calculate similarity between chunks and existing batch nodes"""
+    async def _calculate_batch_similarities(self, chunk_embeddings, neo4j_handler) -> List[List[tuple[str, float]]]:
+        """Calculate similarity between new chunks and existing Chunk nodes (per VLM inference)
+        Returns a list (one per new chunk) of (existing_chunk_id, score) tuples.
+        """
         import math
         
-        # Query existing batch nodes and their embeddings
-        batch_embeddings = await self._get_batch_embeddings(neo4j_handler)
+        # Query existing chunk nodes and their embeddings (keyed by chunk id, not batch id)
+        existing_chunk_embeddings = await self._get_chunk_embeddings(neo4j_handler)
         
         similarities = []
         for chunk_emb in chunk_embeddings:
@@ -287,11 +354,11 @@ class PreLLMInjector:
                 continue
             
             chunk_similarities = []
-            for batch_id, batch_emb in batch_embeddings.items():
-                if batch_emb:
+            for chunk_id, existing_emb in existing_chunk_embeddings.items():
+                if existing_emb:
                     # Calculate cosine similarity manually
-                    similarity = self._cosine_similarity(chunk_emb, batch_emb)
-                    chunk_similarities.append((batch_id, float(similarity)))
+                    similarity = self._cosine_similarity(chunk_emb, existing_emb)
+                    chunk_similarities.append((chunk_id, float(similarity)))
             
             # Sort by similarity and take top_k
             chunk_similarities.sort(key=lambda x: x[1], reverse=True)
@@ -315,36 +382,123 @@ class PreLLMInjector:
         
         return dot_product / (norm1 * norm2)
 
-    async def _get_batch_embeddings(self, neo4j_handler) -> Dict[int, List[float]]:
-        """Get embeddings for existing batch chunks in current graph"""
+    async def _get_chunk_embeddings(self, neo4j_handler) -> Dict[str, List[float]]:
+        """Get embeddings for existing chunk nodes (keyed by chunk node id) in current graph"""
         try:
             async with neo4j_handler.driver.session() as session:
                 result = await session.run("""
                     MATCH (c:Chunk:GraphNode)
-                    WHERE c.graph_uuid = $graph_uuid AND c.batch_id IS NOT NULL AND c.embedding IS NOT NULL
-                    RETURN c.batch_id as batch_id, c.embedding as embedding
-                    LIMIT 1000
+                    WHERE c.graph_uuid = $graph_uuid AND c.id IS NOT NULL AND c.embedding IS NOT NULL
+                    RETURN c.id as chunk_id, c.embedding as embedding
+                    LIMIT 5000
                 """, graph_uuid=neo4j_handler.run_uuid)
-                
-                batch_embeddings = {}
+
+                chunk_embeddings = {}
                 async for record in result:
-                    batch_id = record["batch_id"]
+                    chunk_id = record["chunk_id"]
                     embedding = record["embedding"]
-                    if isinstance(embedding, list):
-                        # Average embeddings per batch (or take first, or some aggregation)
-                        if batch_id not in batch_embeddings:
-                            batch_embeddings[batch_id] = embedding
-                        else:
-                            # Simple average for now
-                            current = batch_embeddings[batch_id]
-                            batch_embeddings[batch_id] = [(a + b) / 2 for a, b in zip(current, embedding)]
-                
-                return batch_embeddings
+                    if isinstance(embedding, list) and chunk_id:
+                        chunk_embeddings[chunk_id] = embedding
+
+                logger.debug(f"Found {len(chunk_embeddings)} existing chunk embeddings for similarity lookup")
+                return chunk_embeddings
         except Exception as e:
-            logger.warning(f"Failed to get batch embeddings: {e}")
+            logger.warning(f"Failed to get chunk embeddings: {e}")
             return {}
 
-    async def _extract_chunk_triplets(self, chunk_text: str, chunk_idx: int) -> List[Dict]:
+    def _get_short_chunk_id(self, full_chunk_id: str) -> str:
+        """Extract short ID {batch}_{chunk} from full chunk_id"""
+        parts = full_chunk_id.split('_')
+        if len(parts) >= 3:
+            return f"{parts[-2]}_{parts[-1]}"
+        return "?"
+        """Extract a concise, LLM-friendly subgraph surrounding the given chunk_id.
+
+        The subgraph includes:
+        - All Entity nodes directly connected to the given Chunk (via FROM_CHUNK)
+        - All relationships where at least one endpoint is in that set of Entity nodes
+        - For relationships with only one endpoint in the set, the other endpoint is included as an external linked entity,
+          with its source_chunk_ids listed to indicate VLm provenance.
+
+        Returns a compact string representation, or an empty string if nothing found.
+        """
+        try:
+            async with neo4j_handler.driver.session() as session:
+                # Get entities connected to this chunk via source_chunk_ids metadata
+                res = await session.run(
+                    """
+                    MATCH (e:Entity:GraphNode)
+                    WHERE e.graph_uuid = $graph_uuid
+                      AND $chunk_id IN coalesce(e.source_chunk_ids, [])
+                    RETURN collect(DISTINCT e.name) AS entities
+                    """,
+                    chunk_id=chunk_id, graph_uuid=neo4j_handler.run_uuid,
+                )
+                record = await res.single()
+                if not record:
+                    logger.debug(f"No entities record found for chunk_id={chunk_id}")
+                    return ""
+                entity_names = record["entities"] if record["entities"] is not None else []
+                if not entity_names:
+                    logger.debug(f"No entities linked to chunk_id={chunk_id} via source_chunk_ids")
+                    return ""
+                logger.debug(f"Found {len(entity_names)} entities linked to chunk_id={chunk_id}")
+
+                # Fetch relationships where at least one endpoint is in our entity set
+                rel_query = """
+                MATCH (e1:Entity:GraphNode)-[r]->(e2:Entity:GraphNode)
+                WHERE e1.graph_uuid = $graph_uuid AND e2.graph_uuid = $graph_uuid
+                AND (e1.name IN $entity_names OR e2.name IN $entity_names)
+                RETURN e1.name as head, type(r) as rel, e2.name as tail,
+                       coalesce(e1.source_chunk_ids, []) as head_chunks,
+                       coalesce(e2.source_chunk_ids, []) as tail_chunks
+                """
+                res = await session.run(
+                    rel_query, graph_uuid=neo4j_handler.run_uuid, entity_names=entity_names
+                )
+
+                relations = []
+                # entities_info = {} # Unused
+                async for rec in res:
+                    head = rec["head"]
+                    tail = rec["tail"]
+                    rel = rec["rel"]
+                    head_chunks = rec["head_chunks"] if rec["head_chunks"] is not None else []
+                    tail_chunks = rec["tail_chunks"] if rec["tail_chunks"] is not None else []
+
+                    relations.append((head, rel, tail, head_chunks, tail_chunks))
+
+                if not relations:
+                    logger.debug(f"No relationships found for entities linked to chunk_id={chunk_id}")
+
+                # Build a compact string representation
+                # Entities list removed as per request
+
+                # Relationships: head-rel->tail
+                rel_parts = []
+                for head, rel, tail, head_chunks, tail_chunks in relations:
+                    # Mark external entities with * and short ID
+                    head_marker = ""
+                    if chunk_id not in head_chunks:
+                        short_id = self._get_short_chunk_id(head_chunks[0]) if head_chunks else "?"
+                        head_marker = f"*{short_id}"
+                    
+                    tail_marker = ""
+                    if chunk_id not in tail_chunks:
+                        short_id = self._get_short_chunk_id(tail_chunks[0]) if tail_chunks else "?"
+                        tail_marker = f"*{short_id}"
+                    
+                    rel_parts.append(f"({head}{head_marker})-[{rel}]->({tail}{tail_marker})")
+
+                # Build final short string: Subgraph only
+                rels_str = ", ".join(rel_parts)
+                short = f"Subgraph: {rels_str}"
+                return short
+        except Exception as e:
+            logger.warning(f"Failed to extract subgraph for chunk {chunk_id}: {e}")
+            return ""
+
+    async def _extract_chunk_triplets(self, chunk_text: str, chunk_idx: int, chunk_id: str) -> List[Dict]:
         """
         Extracts triplets from a single chunk using the LLM with a STRICT TIMEOUT.
         """
@@ -356,7 +510,7 @@ class PreLLMInjector:
         TIMEOUT_SECONDS = 45.0 
 
         try:
-            logger.debug(f"Calling LLM on chunk {chunk_idx} (~{len(chunk_text.split())} words)")
+            logger.debug(f"Calling LLM on chunk {chunk_idx} (ID={chunk_id}) (~{len(chunk_text.split())} words)")
             
             # THE FIX: Wrap the API call in wait_for
             response = await asyncio.wait_for(
@@ -366,7 +520,7 @@ class PreLLMInjector:
 
             # Parse the pipe-delimited output
             llm_output = getattr(response, 'content', str(response)).strip()
-            triplets = self._parse_pipe_delimited_output(llm_output, chunk_idx)
+            triplets = self._parse_pipe_delimited_output(llm_output, chunk_idx, chunk_id)
             logger.debug(f"Extracted {len(triplets)} triplets from chunk {chunk_idx}")
             return triplets
 
@@ -378,7 +532,7 @@ class PreLLMInjector:
             logger.error(f"Error extracting from chunk {chunk_idx}: {e}")
             return []
 
-    def _parse_pipe_delimited_output(self, llm_output: str, chunk_idx: int) -> List[Dict[str, Any]]:
+    def _parse_pipe_delimited_output(self, llm_output: str, chunk_idx: int, chunk_id: str) -> List[Dict[str, Any]]:
         """Parse pipe-delimited triplet output into dict format"""
         triplets = []
         lines = llm_output.strip().split('\n')
@@ -399,7 +553,7 @@ class PreLLMInjector:
                         "head": head,
                         "relation": relation,
                         "tail": tail,
-                        "source_chunks": [chunk_idx]
+                        "source_chunks": [chunk_id]
                     }
                     triplets.append(triplet)
                     

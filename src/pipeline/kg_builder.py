@@ -133,10 +133,11 @@ class KGBuilder:
                 global_limit = self.config.chunking.global_triplet_limit
                 
                 # Step 1: Pre-extraction via hierarchical chunking
+                text_chunks = []
                 if self.pre_llm_injector:
                     pre_start = time.perf_counter()
-                    pre_triplets = await self.pre_llm_injector.extract_local_triplets(
-                        aggregated_content, network_info, self.neo4j_handler
+                    pre_triplets, text_chunks = await self.pre_llm_injector.extract_local_triplets(
+                        aggregated_content, network_info, self.neo4j_handler, batch_idx, self.run_uuid
                     )
                     pre_time = time.perf_counter() - pre_start
                     logger.info(f"Pre-extraction: {len(pre_triplets)} triplets in {pre_time:.2f}s")
@@ -192,7 +193,8 @@ class KGBuilder:
                 inject_timings = await self.neo4j_handler.add_batch_to_graph(
                     cleaned_triplets,
                     batch_data=batch,
-                    batch_idx=batch_idx
+                    batch_idx=batch_idx,
+                    text_chunks=text_chunks
                 )
                 neo4j_time = time.perf_counter() - neo4j_start
 
@@ -276,7 +278,8 @@ class KGBuilder:
             cleaned.append({
                 "head": head.title(),
                 "relation": rel.replace("_", " ").title(),
-                "tail": tail.title()
+                "tail": tail.title(),
+                "source_chunks": triplet.get("source_chunks") or []
             })
             seen.add(key)
 

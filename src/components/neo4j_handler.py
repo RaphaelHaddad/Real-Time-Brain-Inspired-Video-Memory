@@ -83,7 +83,7 @@ class Neo4jHandler:
         
         logger.info("Created graph indexes")
 
-    async def add_batch_to_graph(self, triplets: List[Dict[str, Any]], batch_data: List[Dict], batch_idx: int = 0) -> Dict[str, float]:
+    async def add_batch_to_graph(self, triplets: List[Dict[str, Any]], batch_data: List[Dict], batch_idx: int = 0, text_chunks: List[Dict[str, Any]] = None) -> Dict[str, float]:
         """Add a batch of triplets AND text chunks to the graph (hybrid mode)"""
         start_time = time.perf_counter()
         timings = {
@@ -104,7 +104,7 @@ class Neo4jHandler:
                 await self._create_triplets(session, triplets, batch_time, batch_idx)
                 
                 # Always create chunk nodes for hybrid retrieval
-                await self._create_chunks_with_embeddings(session, batch_data, triplets, batch_idx)
+                await self._create_chunks_with_embeddings(session, batch_data, triplets, batch_idx, text_chunks)
                 
                 injection_time = time.perf_counter() - injection_start
                 timings["graph_injection_time"] = injection_time
@@ -177,8 +177,87 @@ class Neo4jHandler:
                 head=head, tail=tail, graph_uuid=self.run_uuid, source_chunks=source_chunks, batch_idx=batch_idx
             )
 
-    async def _create_chunks_with_embeddings(self, session, batch_data: List[Dict], triplets: List[Dict[str, Any]], batch_idx: int = 0):
+    async def _create_chunks_with_embeddings(self, session, batch_data: List[Dict], triplets: List[Dict[str, Any]], batch_idx: int = 0, text_chunks: List[Dict[str, Any]] = None):
         """Create Chunk nodes with embeddings for hybrid vector+entity retrieval"""
+        
+        # 1. Use text_chunks if provided (New Logic: ID-based)
+        if text_chunks:
+            for chunk in text_chunks:
+                chunk_id = chunk["id"]
+                content = chunk["content"]
+                embedding = chunk.get("embedding")
+                
+                # Create chunk node
+                if embedding:
+                    await session.run(
+                        """
+                        MERGE (c:Chunk:GraphNode {id: $chunk_id, graph_uuid: $graph_uuid})
+                        SET c.content = $content,
+                            c.embedding = $embedding,
+                            c.created_at = datetime(),
+                            c.batch_id = $batch_idx,
+                            c.embedding_model = $embedding_model
+                        """,
+                        chunk_id=chunk_id, graph_uuid=self.run_uuid,
+                        content=content, embedding=embedding, batch_idx=batch_idx,
+                        embedding_model=self.kg_config.embedding_model
+                    )
+                else:
+                    await session.run(
+                        """
+                        MERGE (c:Chunk:GraphNode {id: $chunk_id, graph_uuid: $graph_uuid})
+                        SET c.content = $content,
+                            c.created_at = datetime(),
+                            c.batch_id = $batch_idx
+                        """,
+                        chunk_id=chunk_id, graph_uuid=self.run_uuid,
+                        content=content, batch_idx=batch_idx
+                    )
+                
+                # Link entities to this chunk
+                # source_chunks in triplets are now IDs (strings)
+                for triplet in triplets:
+                    source_chunks = triplet.get('source_chunks', [])
+                    if chunk_id in source_chunks:
+                        head = triplet.get('head', '')
+                        tail = triplet.get('tail', '')
+                        
+                        if head:
+                            await session.run(
+                                """
+                                MATCH (e:Entity {name: $entity, graph_uuid: $graph_uuid})
+                                MATCH (c:Chunk {id: $chunk_id, graph_uuid: $graph_uuid})
+                                MERGE (e)-[:FROM_CHUNK]->(c)
+                                """,
+                                entity=head, chunk_id=chunk_id, graph_uuid=self.run_uuid
+                            )
+                        if tail:
+                            await session.run(
+                                """
+                                MATCH (e:Entity {name: $entity, graph_uuid: $graph_uuid})
+                                MATCH (c:Chunk {id: $chunk_id, graph_uuid: $graph_uuid})
+                                MERGE (e)-[:FROM_CHUNK]->(c)
+                                """,
+                                entity=tail, chunk_id=chunk_id, graph_uuid=self.run_uuid
+                            )
+
+            # Update entity source_chunk_ids
+            try:
+                await session.run(
+                    """
+                    MATCH (e:Entity:GraphNode)-[:FROM_CHUNK]->(c:Chunk:GraphNode)
+                    WHERE e.graph_uuid = $graph_uuid AND c.graph_uuid = $graph_uuid AND c.batch_id = $batch_idx
+                    WITH e, collect(DISTINCT c.id) AS new_chunk_ids
+                    SET e.source_chunk_ids = coalesce(e.source_chunk_ids, []) + new_chunk_ids
+                    """,
+                    graph_uuid=self.run_uuid, batch_idx=batch_idx
+                )
+            except Exception as e:
+                logger.warning(f"Failed to update entity source_chunk_ids for batch {batch_idx}: {e}")
+            
+            return
+
+        # 2. Fallback to original logic (VLM-based chunks)
         if not batch_data:
             return
         
@@ -265,6 +344,20 @@ class Neo4jHandler:
                                 entity=tail, chunk_id=chunk_id, graph_uuid=self.run_uuid
                             )
         
+                # After creating chunk nodes & FROM_CHUNK relationships for this batch,
+                # propagate the list of chunk IDs to each entity as `source_chunk_ids` property
+                try:
+                    await session.run(
+                        """
+                        MATCH (e:Entity:GraphNode)-[:FROM_CHUNK]->(c:Chunk:GraphNode)
+                        WHERE e.graph_uuid = $graph_uuid AND c.graph_uuid = $graph_uuid AND c.batch_id = $batch_idx
+                        WITH e, collect(DISTINCT c.id) AS new_chunk_ids
+                        SET e.source_chunk_ids = coalesce(e.source_chunk_ids, []) + new_chunk_ids
+                        """,
+                        graph_uuid=self.run_uuid, batch_idx=batch_idx
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to update entity source_chunk_ids for batch {batch_idx}: {e}")
         except Exception as e:
             logger.error(f"Error creating chunks with embeddings: {str(e)}")
             # Fallback: create chunks without embeddings
