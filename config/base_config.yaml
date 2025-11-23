@@ -82,3 +82,5 @@ benchmark_llm:
   temperature: 0.2
   top_p: 0.9
   max_tokens: 2048
+# Save per-batch network metrics to a file while the run progresses
+saving_batch_metrics: true

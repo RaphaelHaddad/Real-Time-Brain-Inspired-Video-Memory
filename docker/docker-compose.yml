@@ -10,11 +10,12 @@ services:
     environment:
       - NEO4J_AUTH=neo4j/password  # Default user/initial password
       - NEO4J_dbms_security_auth__minimum__password__length=8
+      # - NEO4J_PLUGINS=["graph-data-science"] # Using manual install
     volumes:
       - neo4j_data:/data
       - neo4j_logs:/logs
       - neo4j_import:/import
-      - neo4j_plugins:/plugins
+      - ./docker/plugins:/plugins # Mount local plugins folder
       - ./docker/neo4j_init.cypher:/docker-entrypoint-initdb.d/init.cypher
     healthcheck:
       test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "password", "RETURN 1;"]

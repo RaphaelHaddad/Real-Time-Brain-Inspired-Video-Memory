@@ -111,6 +111,25 @@ Start the Neo4j database using Docker:
 ```bash
 cd docker
 docker compose up -d
+
+Optional: install Graph Data Science (GDS) plugin (recommended)
+
+If you want to enable Graph Data Science algorithms (PageRank, Louvain, WCC, etc.), add the GDS plugin to the Docker container plugins folder and restart the container. Download a GDS JAR compatible with your Neo4j version into the repository `docker/plugins` directory:
+
+```bash
+# from the repo root
+curl -L -o docker/plugins/neo4j-graph-data-science-2.14.0.jar \
+  https://graphdatascience.ninja/neo4j-graph-data-science-2.14.0.jar
+
+# then restart the container
+cd docker
+docker compose down && docker compose up -d
+```
+
+Notes:
+- Make sure the GDS JAR version is compatible with the Neo4j image you use (check GDS release notes).
+- If your Docker host cannot download the plugin automatically, place the JAR in `docker/plugins/` and mount that folder into the container (we do this in the provided `docker/docker-compose.yml`).
+- GDS is available on Enterprise and some Community builds via plugin jars; consult the Neo4j/GDS docs for licensing/compatibility details.
 ```
 
 ### 3. Build Knowledge Graph

@@ -99,6 +99,8 @@ class PipelineConfig(BaseModel):
     neo4j: Neo4jConfig
     retrieval: RetrievalConfig
     benchmark_llm: Optional[BenchmarkLLMConfig] = None
+    # Save batch-level network metrics to a separate file after each batch
+    saving_batch_metrics: bool = True
 
     @classmethod
     def from_yaml(cls, path: str) -> "PipelineConfig":

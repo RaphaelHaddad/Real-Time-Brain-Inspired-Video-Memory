@@ -308,3 +308,30 @@ class KGBuilder:
 
         self.metrics.add_batch_metrics(batch_metrics)
         logger.debug(f"Batch {batch_idx} metrics: {json.dumps(batch_metrics, indent=2)}")
+        # Optionally save batch-level network science metrics to a running file
+        try:
+            if getattr(self.config, 'saving_batch_metrics', False):
+                from pathlib import Path
+                out_path = Path(f"metrics/{self.run_uuid}_batch_metrics_kg.json")
+                existing = []
+                if out_path.exists():
+                    try:
+                        with open(out_path, 'r') as f:
+                            existing = json.load(f)
+                    except Exception:
+                        existing = []
+
+                # Minimal structured entry for network metrics
+                entry = {
+                    "batch_idx": batch_idx,
+                    "timestamp": time.time(),
+                    "total_time": total_time,
+                    "network_metrics": acs_metrics
+                }
+                existing.append(entry)
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(out_path, 'w') as f:
+                    json.dump(existing, f, indent=2, default=str)
+                logger.debug(f"Saved batch network metrics to: {out_path}")
+        except Exception as e:
+            logger.warning(f"Failed to save per-batch metrics: {e}")
