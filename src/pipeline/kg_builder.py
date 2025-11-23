@@ -191,7 +191,8 @@ class KGBuilder:
                 logger.info(f"Pushing batch {batch_idx + 1}/{total_batches} to graph UUID: {self.run_uuid}")
                 inject_timings = await self.neo4j_handler.add_batch_to_graph(
                     cleaned_triplets,
-                    batch_data=batch
+                    batch_data=batch,
+                    batch_idx=batch_idx
                 )
                 neo4j_time = time.perf_counter() - neo4j_start
 

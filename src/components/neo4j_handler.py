@@ -83,7 +83,7 @@ class Neo4jHandler:
         
         logger.info("Created graph indexes")
 
-    async def add_batch_to_graph(self, triplets: List[Dict[str, Any]], batch_data: List[Dict]) -> Dict[str, float]:
+    async def add_batch_to_graph(self, triplets: List[Dict[str, Any]], batch_data: List[Dict], batch_idx: int = 0) -> Dict[str, float]:
         """Add a batch of triplets AND text chunks to the graph (hybrid mode)"""
         start_time = time.perf_counter()
         timings = {
@@ -101,10 +101,10 @@ class Neo4jHandler:
                 batch_time = batch_data[-1].get('time', '') if batch_data else ""
                 
                 # Create triplets (with source_chunks tracking)
-                await self._create_triplets(session, triplets, batch_time)
+                await self._create_triplets(session, triplets, batch_time, batch_idx)
                 
                 # Always create chunk nodes for hybrid retrieval
-                await self._create_chunks_with_embeddings(session, batch_data, triplets)
+                await self._create_chunks_with_embeddings(session, batch_data, triplets, batch_idx)
                 
                 injection_time = time.perf_counter() - injection_start
                 timings["graph_injection_time"] = injection_time
@@ -124,7 +124,7 @@ class Neo4jHandler:
             logger.error(f"Error adding batch to graph: {str(e)}")
             raise
 
-    async def _create_triplets(self, session, triplets: List[Dict[str, Any]], batch_time: str = ""):
+    async def _create_triplets(self, session, triplets: List[Dict[str, Any]], batch_time: str = "", batch_idx: int = 0):
         """Create triplets in Neo4j, preserving source_chunks metadata"""
         if not triplets:
             return
@@ -145,22 +145,24 @@ class Neo4jHandler:
                 MERGE (h:Entity:GraphNode {name: $head, graph_uuid: $graph_uuid})
                 SET h.created_at = datetime(),
                     h.batch_time = $batch_time,
+                    h.batch_id = $batch_idx,
                     h.source_chunks = $source_chunks
                 """,
                 head=head, graph_uuid=self.run_uuid, batch_time=batch_time, 
-                source_chunks=source_chunks
+                batch_idx=batch_idx, source_chunks=source_chunks
             )
             
             # Create tail entity
             await session.run(
                 """
-                MERGE (t:Entity:GraphNode {name: $tail, graph_uuid: $graph_uuid})
-                SET t.created_at = datetime(),
-                    t.batch_time = $batch_time,
-                    t.source_chunks = $source_chunks
+                MERGE (h:Entity:GraphNode {name: $tail, graph_uuid: $graph_uuid})
+                SET h.created_at = datetime(),
+                    h.batch_time = $batch_time,
+                    h.batch_id = $batch_idx,
+                    h.source_chunks = $source_chunks
                 """,
                 tail=tail, graph_uuid=self.run_uuid, batch_time=batch_time,
-                source_chunks=source_chunks
+                batch_idx=batch_idx, source_chunks=source_chunks
             )
             
             # Create relationship
@@ -169,12 +171,13 @@ class Neo4jHandler:
                 MATCH (h:Entity {{name: $head, graph_uuid: $graph_uuid}})
                 MATCH (t:Entity {{name: $tail, graph_uuid: $graph_uuid}})
                 MERGE (h)-[r:`{relation.replace(' ', '_').upper()}` {{graph_uuid: $graph_uuid}}]->(t)
-                SET r.source_chunks = $source_chunks
+                SET r.source_chunks = $source_chunks,
+                    r.batch_id = $batch_idx
                 """,
-                head=head, tail=tail, graph_uuid=self.run_uuid, source_chunks=source_chunks
+                head=head, tail=tail, graph_uuid=self.run_uuid, source_chunks=source_chunks, batch_idx=batch_idx
             )
 
-    async def _create_chunks_with_embeddings(self, session, batch_data: List[Dict], triplets: List[Dict[str, Any]]):
+    async def _create_chunks_with_embeddings(self, session, batch_data: List[Dict], triplets: List[Dict[str, Any]], batch_idx: int = 0):
         """Create Chunk nodes with embeddings for hybrid vector+entity retrieval"""
         if not batch_data:
             return
@@ -211,10 +214,11 @@ class Neo4jHandler:
                             c.content = $content,
                             c.embedding = $embedding,
                             c.created_at = datetime(),
+                            c.batch_id = $batch_idx,
                             c.embedding_model = $embedding_model
                         """,
                         chunk_id=chunk_id, graph_uuid=self.run_uuid, time=chunk_time,
-                        content=content, embedding=embedding, 
+                        content=content, embedding=embedding, batch_idx=batch_idx,
                         embedding_model=self.kg_config.embedding_model
                     )
                 else:
@@ -223,10 +227,11 @@ class Neo4jHandler:
                         MERGE (c:Chunk:GraphNode {id: $chunk_id, graph_uuid: $graph_uuid})
                         SET c.time = $time,
                             c.content = $content,
-                            c.created_at = datetime()
+                            c.created_at = datetime(),
+                            c.batch_id = $batch_idx
                         """,
                         chunk_id=chunk_id, graph_uuid=self.run_uuid, time=chunk_time,
-                        content=content
+                        content=content, batch_idx=batch_idx
                     )
                 
                 # Create relationships from entities to chunks based on source_chunks

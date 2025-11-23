@@ -19,7 +19,7 @@ logger = get_logger(__name__)
 
 
 class PreLLMInjector:
-    """Local extraction from chunks using LLMGraphTransformer"""
+    """Local extraction from chunks using optimized pipe-delimited LLM calls"""
 
     def __init__(self, llm: BaseChatModel, config: ChunkingConfig):
         self.config = config
@@ -29,19 +29,10 @@ class PreLLMInjector:
         # Build a ChatPromptTemplate using the centralized prompts module so prompts
         # can be edited in one place. The helper will inject the configured
         # max_triplets while preserving the {input} placeholder.
-        prompt_template = build_pre_llm_prompt_template(config.max_triplets_per_chunk)
+        self.prompt_template = build_pre_llm_prompt_template(config.max_triplets_per_chunk)
 
-        # Initialize LLMGraphTransformer with custom prompt
-        # NOTE: Passing an empty list to allowed_nodes results in ZERO nodes extracted.
-        # Use None to allow all node types. This was causing 0 triplets previously.
-        self.transformer = LLMGraphTransformer(
-            llm=llm,
-            allowed_nodes=None,  # Allow all node types
-            node_properties=False,  # Skip properties for speed
-            relationship_properties=False,
-            ignore_tool_usage=True,
-            prompt=prompt_template,
-        )
+        # Create a simple chain for direct LLM calls
+        self.chain = self.llm
 
         # Initialize text splitter with overlap for context preservation
         self.splitter = TokenTextSplitter(
@@ -140,89 +131,58 @@ class PreLLMInjector:
         return all_triplets
 
     async def _extract_chunk_triplets(self, chunk: str, chunk_idx: int = 0) -> List[Dict[str, Any]]:
-        """Extract triplets from a single chunk using LLMGraphTransformer"""
+        """Extract triplets from a single chunk using optimized pipe-delimited LLM call"""
         try:
-            # Wrap in Document for langchain
-            doc = Document(page_content=chunk)
+            # Debug: log the chunk size before calling LLM
+            logger.debug(f"Calling LLM on chunk {chunk_idx} (~{len(chunk.split())} words)")
 
-            # Debug: log the chunk size before calling transformer
-            logger.debug(f"Calling transformer on chunk {chunk_idx} (~{len(chunk.split())} words)")
+            # Format the prompt with the chunk content
+            prompt = self.prompt_template.format(input=chunk)
 
-            # Use LLMGraphTransformer to extract graph structure
-            graph_docs = await self.transformer.aconvert_to_graph_documents([doc])
+            # Call the LLM directly
+            response = await self.chain.ainvoke([("user", prompt)])
+            llm_output = getattr(response, 'content', str(response)).strip()
 
-            # Debug: log raw graph document summary
-            logger.debug(f"Transformer returned {len(graph_docs)} graph_docs")
-            for gd_idx, gd in enumerate(graph_docs):
-                rels = getattr(gd, 'relationships', None)
-                nodes = getattr(gd, 'nodes', None)
-                rel_count = len(rels) if rels is not None else 0
-                node_count = len(nodes) if nodes is not None else 0
-                logger.debug(f"graph_doc[{gd_idx}] nodes={node_count} relationships={rel_count}")
+            # Parse the pipe-delimited output
+            triplets = self._parse_pipe_delimited_output(llm_output, chunk_idx)
 
-            # Convert GraphDocument to triplet format with source chunk tracking
-            triplets = []
-            for graph_doc in graph_docs:
-                rel_count = 0
-                relationships = getattr(graph_doc, 'relationships', []) or []
-                for rel in relationships:
-                    if len(triplets) >= self.config.max_triplets_per_chunk:
-                        break
-                    # Some GraphDocument relationship objects may not have expected attributes
-                    try:
-                        head_id = getattr(rel.source, 'id', str(getattr(rel.source, 'name', '')))
-                        relation_type = getattr(rel, 'type', getattr(rel, 'relation_type', 'related_to'))
-                        tail_id = getattr(rel.target, 'id', str(getattr(rel.target, 'name', '')))
-                    except Exception:
-                        logger.debug(f"Unexpected relationship object structure: {rel}")
-                        continue
-
-                    triplet = {
-                        "head": head_id,
-                        "relation": relation_type,
-                        "tail": tail_id,
-                        "source_chunks": [chunk_idx],  # Track which chunk this came from
-                    }
-                    triplets.append(triplet)
-                    rel_count += 1
-
-                logger.debug(
-                    f"graph_doc produced {rel_count} relationships (accumulated {len(triplets)})"
-                )
-
-            if len(triplets) > 0:
-                logger.debug(
-                    f"Extracted {len(triplets)} triplets from chunk {chunk_idx}"
-                    f"(~{len(chunk.split())} words)"
-                )
-
-            # Ensure returned triplets are dicts with required keys; coerce if necessary
-            clean_triplets = []
-            for t in triplets:
-                if isinstance(t, dict):
-                    clean_triplets.append(t)
-                else:
-                    # Try to recover if transformer returned a JSON string
-                    try:
-                        parsed = json.loads(t)
-                        if isinstance(parsed, dict):
-                            if "source_chunks" not in parsed:
-                                parsed["source_chunks"] = [chunk_idx]
-                            clean_triplets.append(parsed)
-                        elif isinstance(parsed, list):
-                            for el in parsed:
-                                if isinstance(el, dict):
-                                    if "source_chunks" not in el:
-                                        el["source_chunks"] = [chunk_idx]
-                                    clean_triplets.append(el)
-                    except Exception:
-                        logger.debug(f"Skipping non-dict triplet value: {t}")
-
-            return clean_triplets
+            logger.debug(f"Extracted {len(triplets)} triplets from chunk {chunk_idx}")
+            return triplets
 
         except Exception as e:
             logger.error(f"Chunk {chunk_idx} extraction error: {str(e)}")
             return []
+
+    def _parse_pipe_delimited_output(self, llm_output: str, chunk_idx: int) -> List[Dict[str, Any]]:
+        """Parse pipe-delimited triplet output into dict format"""
+        triplets = []
+        lines = llm_output.strip().split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            if not line or '|' not in line:
+                continue
+            
+            parts = line.split('|')
+            if len(parts) == 3:
+                head = parts[0].strip()
+                relation = parts[1].strip()
+                tail = parts[2].strip()
+                
+                if head and relation and tail:
+                    triplet = {
+                        "head": head,
+                        "relation": relation,
+                        "tail": tail,
+                        "source_chunks": [chunk_idx]
+                    }
+                    triplets.append(triplet)
+                    
+                    # Respect max_triplets_per_chunk limit
+                    if len(triplets) >= self.config.max_triplets_per_chunk:
+                        break
+        
+        return triplets
 
     def _deduplicate_triplets(
         self, triplets: List[Dict[str, Any]]

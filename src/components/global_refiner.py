@@ -9,16 +9,17 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 from ..core.config import ChunkingConfig
+from .prompts import get_llm_injector_prompt_template
 from ..core.logger import get_logger
 
 logger = get_logger(__name__)
 
 
-class RefinedTriplet(BaseModel):
-    """Structured output for refined triplets"""
+class CompactTripletOutput(BaseModel):
+    """Structured output for compact triplet format"""
 
-    triplets: List[Dict[str, Any]] = Field(
-        description="Refined list of triplets with head, relation, tail, and source_chunks"
+    triplets: List[List] = Field(
+        description="List of triplets as [head, relation, tail, source_chunks]"
     )
 
 
@@ -35,35 +36,12 @@ class GlobalRefiner:
             max_tokens=chunking_config.refinement_max_tokens,
         )
 
-        self.chain = self.llm.with_structured_output(RefinedTriplet)
-        self.prompt_template = self._load_prompt_template()
+        self.chain = self.llm.with_structured_output(CompactTripletOutput)
+        self.prompt_template = get_llm_injector_prompt_template()
 
         logger.info(
             f"Initialized GlobalRefiner with max_tokens={chunking_config.refinement_max_tokens}"
         )
-
-    def _load_prompt_template(self) -> ChatPromptTemplate:
-        """Minimal prompt for refinement"""
-        template = """Review these candidate triplets extracted from a video description.
-
-NETWORK CONTEXT:
-{network_info}
-
-TRIPLETS TO REFINE:
-{triplets_json}
-
-INSTRUCTIONS:
-1. Merge duplicate triplets (same head, relation, tail with different casing)
-2. Infer transitive relations (if A→B and B→C both exist, suggest A→C if implied)
-3. Remove inconsistent or low-confidence triplets
-4. Keep temporal information if present
-5. Return ONLY valid, non-redundant triplets
-
-OUTPUT FORMAT:
-Return JSON with "triplets" array containing objects with "head", "relation", "tail".
-Example: {{"triplets": [{{"head": "Person", "relation": "uses", "tail": "Equipment"}}]}}
-"""
-        return ChatPromptTemplate.from_template(template)
 
     async def refine_triplets(
         self, triplets: List[Dict[str, Any]], network_info: str = "", 
@@ -100,7 +78,7 @@ Example: {{"triplets": [{{"head": "Person", "relation": "uses", "tail": "Equipme
 
             prompt = self.prompt_template.format(
                 network_info=network_info or "No graph context available",
-                triplets_json=triplets_json,
+                pre_extracted_triplets=triplets_json,
             )
 
             prompt_words = len(prompt.split())
@@ -116,7 +94,20 @@ Example: {{"triplets": [{{"head": "Person", "relation": "uses", "tail": "Equipme
             llm_time = time.perf_counter() - llm_start
             logger.debug(f"LLM call completed in {llm_time:.2f}s")
 
-            refined = output.triplets
+            # Convert compact list format to dict format
+            compact_triplets = output.triplets
+            logger.debug(f"LLM refinement output: {json.dumps(compact_triplets, indent=2)}")
+            
+            refined = []
+            for item in compact_triplets:
+                if len(item) == 4:
+                    triplet_dict = {
+                        "head": item[0],
+                        "relation": item[1],
+                        "tail": item[2],
+                        "source_chunks": item[3] if isinstance(item[3], list) else [item[3]]
+                    }
+                    refined.append(triplet_dict)
             
             # Post-process: ensure source_chunks field exists and is properly formatted
             for triplet in refined:
