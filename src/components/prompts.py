@@ -88,12 +88,15 @@ LIMITS:
 1. "new_triplets": List of new facts NOT in CONTEXT. Format: [[Head, Relation, Tail, [SourceIndices]], ...]
 2. "inter_chunk_relations": New links NEW → CONTEXT. Format: [[NewHead, Relation, ExistingTail, [SourceIndices]], ...] (ExistingTail: name from CONTEXT, no ID here).
 3. "merge_instructions": Merge local dups to existing. Format: [{{"local": LocalName, "existing": ExistingName, "existing_id": ExistingID}}, ...]
-4. "prune_instructions": Remove noise from CONTEXT. Format: [{{"head": HeadName, "relation": RelationName, "tail": TailName, "source_id": SourceID}}, ...]
+4. "prune_instructions": Remove entities or relationships from CONTEXT. Format: Either {{"entity": EntityName}} to delete an entity and all its relationships, or {{"head": HeadName, "relation": RelationName, "tail": TailName}} to delete a specific relationship.
 
 ### EXAMPLES:
 Merge: "merge_instructions": [{{"local": "Nitrile Glove", "existing": "Blue Glove", "existing_id": "0_3"}}]
 Link: "inter_chunk_relations": [["Document", "Is On", "Laboratory Table", [2_3]]] // Tail matches CONTEXT "Laboratory Table"
-Prune: "prune_instructions": [{{"head": "Person", "relation": "Wears", "tail": "No Glove", "source_id": "1_0"}}]
+Prune: "prune_instructions": [
+  {{"entity": "Incorrect Entity"}},  // Delete entity and all its relationships
+  {{"head": "Person", "relation": "Wears", "tail": "No Glove"}}  // Delete specific relationship
+]
 
 JSON OUTPUT:
 """

@@ -3,13 +3,14 @@ from ..components.neo4j_handler import Neo4jHandler
 from typing import Dict, Any
 import time
 import networkx as nx
+import math
 
 logger = get_logger(__name__)
 
 class ACSAutomata:
     """
     ACS (Adaptive Computing System) Automata
-    Computes network science metrics that can be updated efficiently after each batch
+    Computes network science metrics using NetworkX (in-memory) for reliability and simplicity.
     """
     
     def __init__(self, neo4j_handler: Neo4jHandler):
@@ -18,138 +19,247 @@ class ACSAutomata:
         self.last_update_time = time.time()
         
     async def update_metrics(self) -> Dict[str, Any]:
-        """Update and compute network science metrics"""
+        """Update and compute network science metrics using NetworkX"""
         start_time = time.perf_counter()
         
         try:
-            logger.info("Computing network science metrics...")
+            logger.info("Computing network science metrics using NetworkX...")
             
-            # Compute basic graph metrics
-            node_count = await self._compute_node_count()
-            rel_count = await self._compute_relationship_count()
+            # Build NetworkX graph from Neo4j
+            G = await self._build_networkx_graph()
+            
+            # Basic metrics
+            node_count = G.number_of_nodes()
+            rel_count = G.number_of_edges()
+            
+            # Density
+            if node_count < 2:
+                density = 0.0
+            else:
+                density = nx.density(G)
+            
+            # Avg Degree (total edges)
+            if node_count == 0:
+                avg_degree = 0.0
+            else:
+                # For directed graph: sum(in_degree + out_degree) / n = 2 * m / n
+                avg_degree = (2 * rel_count) / node_count
+            
+            # Avg Unique Neighbors Degree (unique connections, ignoring multi-edges)
+            if node_count == 0:
+                avg_unique_neighbors = 0.0
+            else:
+                # Convert to undirected to count unique neighbors only
+                G_undir = G.to_undirected()
+                # Remove self-loops if any
+                G_undir.remove_edges_from(nx.selfloop_edges(G_undir))
+                degrees = dict(G_undir.degree())
+                avg_unique_neighbors = sum(degrees.values()) / len(degrees) if degrees else 0.0
+            
+            # Global Efficiency (shows inter-chunk connectivity benefits)
+            # Compute on undirected largest connected component for meaningful values.
+            try:
+                G_undir = G.to_undirected()
+                if node_count < 2:
+                    global_efficiency = 0.0
+                else:
+                    # For small graphs compute exact; for large graphs compute sampling approximation
+                    SMALL_LIMIT = 500
+                    if node_count <= SMALL_LIMIT:
+                        global_efficiency = nx.global_efficiency(G_undir)
+                        logger.debug(f"Computed exact global_efficiency on {node_count} nodes")
+                    else:
+                        # Sampling-based approximation for global efficiency
+                        import random
+                        random.seed(42)
+                        SAMPLE_SOURCES = min(100, node_count)
+                        nodes = list(G_undir.nodes())
+                        sample_sum = 0.0
+                        sample_count = 0
+                        for _ in range(SAMPLE_SOURCES):
+                            source = random.choice(nodes)
+                            lengths = nx.single_source_shortest_path_length(G_undir, source)
+                            # count reachable distances as reciprocal contributions
+                            for target, d in lengths.items():
+                                if target == source:
+                                    continue
+                                if d and d > 0:
+                                    sample_sum += 1.0 / d
+                            # Include unreachable nodes as zero contributions: count total possible targets
+                            sample_count += (len(nodes) - 1)
+                        global_efficiency = (sample_sum / sample_count) if sample_count > 0 else 0.0
+                        logger.debug(f"Computed approximate global_efficiency with {SAMPLE_SOURCES} samples")
+            except Exception:
+                global_efficiency = 0.0
+            
+            # Average Path Length (shorter paths = better merging)
+            try:
+                # Compute path lengths on undirected largest connected component for meaningful average distances
+                G_undir = G.to_undirected()
+                if G_undir.number_of_nodes() < 2:
+                    avg_path_length = None
+                else:
+                    connected = nx.is_connected(G_undir)
+                    if connected:
+                        comp = G_undir
+                    else:
+                        largest_cc = max(nx.connected_components(G_undir), key=len)
+                        comp = G_undir.subgraph(largest_cc)
+
+                    # For small graphs compute exact; else sample nodes to approximate average
+                    SMALL_LIMIT = 500
+                    if comp.number_of_nodes() <= SMALL_LIMIT:
+                        avg_path_length = nx.average_shortest_path_length(comp)
+                        logger.debug(f"Computed exact avg_path_length on component with {comp.number_of_nodes()} nodes")
+                    else:
+                        # Sampling-based approximation of average shortest path length
+                        import random
+                        random.seed(42)
+                        nodes = list(comp.nodes())
+                        SAMPLE_SOURCES = min(100, len(nodes))
+                        total_sum = 0.0
+                        total_count = 0
+                        for _ in range(SAMPLE_SOURCES):
+                            source = random.choice(nodes)
+                            lengths = nx.single_source_shortest_path_length(comp, source)
+                            for target, d in lengths.items():
+                                if target == source:
+                                    continue
+                                total_sum += d
+                                total_count += 1
+                        avg_path_length = (total_sum / total_count) if total_count > 0 else None
+                        logger.debug(f"Computed approximate avg_path_length with {SAMPLE_SOURCES} samples on component size {len(nodes)}")
+            except Exception:
+                avg_path_length = None
+            
+            # Degree Centrality (shows entity importance after merging)
+            try:
+                degree_centrality = nx.degree_centrality(G)
+                avg_degree_centrality = sum(degree_centrality.values()) / len(degree_centrality)
+                max_degree_centrality = max(degree_centrality.values()) if degree_centrality else 0.0
+            except Exception:
+                avg_degree_centrality = 0.0
+                max_degree_centrality = 0.0
+            
+            # Betweenness Centrality (shows bridging entities from inter-chunk)
+            try:
+                betweenness = nx.betweenness_centrality(G, k=min(100, node_count))  # Approximate for large graphs
+                avg_betweenness = sum(betweenness.values()) / len(betweenness)
+                max_betweenness = max(betweenness.values()) if betweenness else 0.0
+            except Exception:
+                avg_betweenness = 0.0
+                max_betweenness = 0.0
+            
+            # Assortativity (shows if similar entities connect - benefit of merging)
+            try:
+                degree_assortativity = nx.degree_assortativity_coefficient(G)
+            except Exception:
+                degree_assortativity = 0.0
+            
+            # Graph Robustness (random node removal)
+            try:
+                # Simulate removing 10% of nodes randomly
+                if node_count > 10:
+                    nodes_to_remove = int(0.1 * node_count)
+                    G_robust = G.copy()
+                    import random
+                    nodes_list = list(G_robust.nodes())
+                    random.seed(42)  # For reproducibility
+                    nodes_to_remove_list = random.sample(nodes_list, min(nodes_to_remove, len(nodes_list)))
+                    G_robust.remove_nodes_from(nodes_to_remove_list)
+                    
+                    if G_robust.number_of_nodes() > 1:
+                        robustness = G_robust.number_of_edges() / G.number_of_edges()
+                    else:
+                        robustness = 0.0
+                else:
+                    robustness = 1.0
+            except Exception:
+                robustness = 0.0
+            
+            # Diameter (estimate)
+            diameter_estimate = 0
+            if node_count > 0:
+                 if node_count < 500: # Only compute for small graphs
+                    try:
+                        # Diameter is defined for connected graphs. Use largest WCC.
+                        if nx.is_weakly_connected(G):
+                             diameter_estimate = nx.diameter(G.to_undirected())
+                        else:
+                             # Get largest component
+                             largest_cc = max(nx.connected_components(G.to_undirected()), key=len)
+                             subgraph = G.to_undirected().subgraph(largest_cc)
+                             diameter_estimate = nx.diameter(subgraph)
+                    except Exception:
+                        diameter_estimate = min(node_count // 2, 50)
+                 else:
+                    diameter_estimate = min(node_count // 2, 50)
+
+            # Clustering Coefficient (Average)
+            try:
+                clustering_coefficient = nx.average_clustering(G)
+            except Exception:
+                clustering_coefficient = 0.0
+
+            # Weakly Connected Components
+            wcc = list(nx.weakly_connected_components(G))
+            wcc_count = len(wcc)
+            largest_wcc_size = max(len(c) for c in wcc) if wcc else 0
+
+            # PageRank
+            try:
+                pagerank = nx.pagerank(G)
+                scores = list(pagerank.values())
+                total_pr = sum(scores)
+                scores.sort(reverse=True)
+                top10 = scores[:10]
+                pagerank_top10_percent = (sum(top10) / total_pr * 100.0) if total_pr > 0 else 0.0
+            except Exception:
+                pagerank_top10_percent = 0.0
+
+            # Louvain Communities
+            louvain_communities = 0
+            louvain_modularity = 0.0
+            try:
+                G_undir = G.to_undirected()
+                # Check if louvain is available in nx (v2.8+)
+                if hasattr(nx.community, 'louvain_communities'):
+                    comms = nx.community.louvain_communities(G_undir)
+                    louvain_communities = len(comms)
+                    louvain_modularity = nx.community.modularity(G_undir, comms)
+                else:
+                    logger.warning("nx.community.louvain_communities not available")
+            except Exception as e:
+                logger.warning(f"Louvain computation failed: {e}")
+
+            # Label Entropy
+            label_entropy = await self._compute_label_entropy()
+
             metrics = {
                 "node_count": node_count,
                 "relationship_count": rel_count,
-                "density": await self._compute_density(),
-                "avg_degree": await self._compute_avg_degree(),
-                "diameter_estimate": await self._compute_diameter_estimate(),
-                "clustering_coefficient": await self._compute_clustering_coefficient(),
+                "density": round(density, 4),
+                "avg_degree": round(avg_degree, 4),
+                "avg_unique_neighbors": round(avg_unique_neighbors, 4),
+                "global_efficiency": round(global_efficiency, 4),
+                "avg_path_length": round(avg_path_length, 4) if avg_path_length is not None else None,
+                "avg_degree_centrality": round(avg_degree_centrality, 4),
+                "max_degree_centrality": round(max_degree_centrality, 4),
+                "avg_betweenness_centrality": round(avg_betweenness, 4),
+                "max_betweenness_centrality": round(max_betweenness, 4),
+                "degree_assortativity": round(degree_assortativity, 4),
+                "graph_robustness": round(robustness, 4),
+                "diameter_estimate": diameter_estimate,
+                "clustering_coefficient": round(clustering_coefficient, 4),
+                "weakly_connected_components": wcc_count,
+                "largest_wcc_size": largest_wcc_size,
+                "pagerank_top10_percent": round(pagerank_top10_percent, 2),
+                "louvain_communities": louvain_communities,
+                "louvain_modularity": round(louvain_modularity, 4) if louvain_modularity is not None else None,
+                "label_entropy": label_entropy,
                 "computational_time": time.perf_counter() - start_time
             }
 
-            # Additional network-science metrics using GDS where available (best-effort)
-            try:
-                # Weakly connected components (WCC) count and largest component size
-                wcc_query = """
-                CALL gds.wcc.stream({nodeProjection: '__ALL__', relationshipProjection: '__ALL__'})
-                YIELD nodeId, componentId
-                RETURN componentId, count(*) as size
-                ORDER BY size DESC
-                """
-                async with self.neo4j_handler.driver.session() as session:
-                    res = await session.run(wcc_query)
-                    comps = [rec async for rec in res]
-                    wcc_count = len(comps)
-                    largest_wcc = comps[0]['size'] if comps else 0
-            except Exception as e:
-                logger.error(f"Failed to compute WCC metrics: {str(e)}")
-                wcc_count = None
-                largest_wcc = None
-
-            metrics.update({
-                "weakly_connected_components": wcc_count,
-                "largest_wcc_size": largest_wcc
-            })
-
-            # PageRank top-10 percent
-            try:
-                pr_query = """
-                CALL gds.pageRank.stream({nodeProjection: '__ALL__', relationshipProjection: '__ALL__'})
-                YIELD nodeId, score
-                RETURN score
-                ORDER BY score DESC
-                """
-                async with self.neo4j_handler.driver.session() as session:
-                    res = await session.run(pr_query)
-                    scores = [float(rec['score']) async for rec in res]
-                    total_pr = sum(scores) if scores else 0.0
-                    top10 = scores[:10]
-                    pr_top10_pct = (sum(top10) / total_pr * 100.0) if total_pr > 0 else None
-            except Exception as e:
-                logger.error(f"Failed to compute PageRank top10 percent: {str(e)}")
-                pr_top10_pct = None
-
-            metrics.update({
-                "pagerank_top10_percent": pr_top10_pct
-            })
-
-            # Louvain communities count and (best-effort) modularity
-            try:
-                louv_query = """
-                CALL gds.louvain.stream({nodeProjection: '__ALL__', relationshipProjection: '__ALL__'})
-                YIELD nodeId, communityId
-                RETURN communityId, count(*) as size
-                ORDER BY size DESC
-                """
-                async with self.neo4j_handler.driver.session() as session:
-                    res = await session.run(louv_query)
-                    comms = [rec async for rec in res]
-                    community_count = len(comms)
-                    # modularity not directly provided by stream; set None if not available
-                    modularity = None
-            except Exception as e:
-                logger.error(f"Failed to compute Louvain communities: {str(e)}")
-                community_count = None
-                modularity = None
-
-            metrics.update({
-                "louvain_communities": community_count,
-                "louvain_modularity": modularity
-            })
-
-            # Label entropy (Shannon) based on node labels distribution
-            try:
-                async with self.neo4j_handler.driver.session() as session:
-                    lbl_q = """
-                    MATCH (n:GraphNode) WHERE n.graph_uuid = $graph_uuid
-                    UNWIND labels(n) as lab
-                    RETURN lab, count(*) as cnt
-                    """
-                    res = await session.run(lbl_q, graph_uuid=self.neo4j_handler.run_uuid)
-                    label_counts = {rec['lab']: rec['cnt'] async for rec in res}
-                    # compute Shannon entropy
-                    import math
-                    total = sum(label_counts.values())
-                    entropy = 0.0
-                    if total > 0:
-                        for c in label_counts.values():
-                            p = c / total
-                            entropy -= p * math.log(p, 2)
-                    label_entropy = round(entropy, 4)
-            except Exception as e:
-                logger.error(f"Failed to compute label entropy: {str(e)}")
-                label_entropy = None
-
-            metrics.update({
-                "label_entropy": label_entropy
-            })
-            
-            # Check if we need fallback for any null GDS metrics
-            if (metrics.get("weakly_connected_components") is None or 
-                metrics.get("pagerank_top10_percent") is None or 
-                metrics.get("louvain_communities") is None):
-                
-                fallback_metrics = await self._compute_networkx_fallback()
-                # Only update keys that are None
-                for k, v in fallback_metrics.items():
-                    if metrics.get(k) is None:
-                        metrics[k] = v
-
-            # Log any null metrics for diagnostics
-            null_metrics = [k for k, v in metrics.items() if v is None]
-            if null_metrics:
-                logger.error(f"Null metrics detected for run_uuid {self.neo4j_handler.run_uuid}: {null_metrics}")
-            
             self.metrics_cache.update(metrics)
             self.last_update_time = time.time()
             
@@ -160,137 +270,55 @@ class ACSAutomata:
             logger.error(f"Error computing network metrics: {str(e)}")
             return {"error": str(e), "computational_time": time.perf_counter() - start_time}
 
-    async def _compute_node_count(self) -> int:
-        """Compute the number of nodes in the graph"""
-        return await self.neo4j_handler.get_node_count()
-
-    async def _compute_relationship_count(self) -> int:
-        """Compute the number of relationships in the graph"""
-        return await self.neo4j_handler.get_relationship_count()
-
-    async def _compute_density(self) -> float:
-        """Compute graph density (ratio of actual edges to possible edges)"""
+    async def _build_networkx_graph(self) -> nx.DiGraph:
+        """Build a NetworkX graph from the Neo4j subgraph for the current run"""
+        G = nx.DiGraph()
         try:
-            node_count = await self._compute_node_count()
-            rel_count = await self._compute_relationship_count()
-            
-            if node_count < 2:
-                return 0.0
-                
-            # For directed graphs, max possible edges is n*(n-1)
-            max_possible_edges = node_count * (node_count - 1)
-            density = rel_count / max_possible_edges if max_possible_edges > 0 else 0.0
-            
-            return round(density, 4)
-        except Exception as e:
-            logger.error(f"Error computing density: {str(e)}")
-            return 0.0
-
-    async def _compute_avg_degree(self) -> float:
-        """Compute average node degree"""
-        try:
-            node_count = await self._compute_node_count()
-            rel_count = await self._compute_relationship_count()
-            
-            if node_count == 0:
-                return 0.0
-            
-            # In a directed graph, avg degree is total relationships / nodes
-            avg_degree = (2 * rel_count) / node_count if node_count > 0 else 0.0
-            return round(avg_degree, 4)
-        except Exception as e:
-            logger.error(f"Error computing avg degree: {str(e)}")
-            return 0.0
-
-    async def _compute_diameter_estimate(self) -> int:
-        """Estimate the diameter of the graph (will implement a simple estimation)"""
-        # For now, we'll return a placeholder value
-        # In a real implementation, this would be more complex
-        try:
-            node_count = await self._compute_node_count()
-            if node_count == 0:
-                return 0
-            elif node_count < 10:
-                return min(node_count, 5)  # Small graph
-            else:
-                return min(node_count // 2, 50)  # Estimate for larger graphs
-        except Exception as e:
-            logger.error(f"Error computing diameter estimate: {str(e)}")
-            return 0
-
-    async def _compute_clustering_coefficient(self) -> float:
-        """Compute the clustering coefficient (simplified estimation)"""
-        try:
-            node_count = await self._compute_node_count()
-            rel_count = await self._compute_relationship_count()
-            
-            if node_count < 2:
-                return 0.0
-            
-            # Simplified estimation of clustering coefficient
-            # In real implementation, this would require actual triangle counting
-            density = await self._compute_density()
-            clustering = min(density * 2, 1.0)  # Rough estimation
-            
-            return round(clustering, 4)
-        except Exception as e:
-            logger.error(f"Error computing clustering coefficient: {str(e)}")
-            return 0.0
-
-    async def _compute_networkx_fallback(self) -> Dict[str, Any]:
-        """Compute metrics using NetworkX when GDS is unavailable"""
-        try:
-            logger.info("GDS unavailable, falling back to NetworkX for metrics...")
-            G = nx.DiGraph()
             async with self.neo4j_handler.driver.session() as session:
-                # Fetch nodes
-                result_nodes = await session.run("MATCH (n) RETURN elementId(n) as id")
+                # Fetch nodes filtered by graph_uuid
+                node_query = """
+                MATCH (n:GraphNode) 
+                WHERE n.graph_uuid = $graph_uuid 
+                RETURN elementId(n) as id
+                """
+                result_nodes = await session.run(node_query, graph_uuid=self.neo4j_handler.run_uuid)
                 nodes = [record["id"] async for record in result_nodes]
                 G.add_nodes_from(nodes)
                 
-                # Fetch edges
-                result_edges = await session.run("MATCH (n)-[r]->(m) RETURN elementId(n) as source, elementId(m) as target")
+                # Fetch edges where both source and target are in the graph_uuid
+                edge_query = """
+                MATCH (n:GraphNode)-[r]->(m:GraphNode)
+                WHERE n.graph_uuid = $graph_uuid AND m.graph_uuid = $graph_uuid
+                RETURN elementId(n) as source, elementId(m) as target
+                """
+                result_edges = await session.run(edge_query, graph_uuid=self.neo4j_handler.run_uuid)
                 edges = [(record["source"], record["target"]) async for record in result_edges]
                 G.add_edges_from(edges)
-            
-            if len(G) == 0:
-                return {}
-
-            metrics = {}
-            
-            # WCC
-            wcc = list(nx.weakly_connected_components(G))
-            metrics["weakly_connected_components"] = len(wcc)
-            metrics["largest_wcc_size"] = max(len(c) for c in wcc) if wcc else 0
-            
-            # PageRank
-            try:
-                pagerank = nx.pagerank(G)
-                scores = list(pagerank.values())
-                total_pr = sum(scores)
-                # Top 10 nodes share
-                scores.sort(reverse=True)
-                top10 = scores[:10]
-                metrics["pagerank_top10_percent"] = (sum(top10) / total_pr * 100.0) if total_pr > 0 else 0
-            except Exception:
-                metrics["pagerank_top10_percent"] = None
-
-            # Louvain (requires undirected)
-            try:
-                G_undir = G.to_undirected()
-                # Check if louvain is available
-                if hasattr(nx.community, 'louvain_communities'):
-                    louvain_comms = nx.community.louvain_communities(G_undir)
-                    metrics["louvain_communities"] = len(louvain_comms)
-                    metrics["louvain_modularity"] = nx.community.modularity(G_undir, louvain_comms)
-                else:
-                    metrics["louvain_communities"] = None
-                    metrics["louvain_modularity"] = None
-            except Exception:
-                metrics["louvain_communities"] = None
-                metrics["louvain_modularity"] = None
                 
-            return metrics
+            return G
         except Exception as e:
-            logger.error(f"NetworkX fallback failed: {e}")
-            return {}
+            logger.error(f"Error building NetworkX graph: {str(e)}")
+            return nx.DiGraph()
+
+    async def _compute_label_entropy(self) -> float:
+        """Compute Shannon entropy of node labels"""
+        try:
+            async with self.neo4j_handler.driver.session() as session:
+                lbl_q = """
+                MATCH (n:GraphNode) WHERE n.graph_uuid = $graph_uuid
+                UNWIND labels(n) as lab
+                RETURN lab, count(*) as cnt
+                """
+                res = await session.run(lbl_q, graph_uuid=self.neo4j_handler.run_uuid)
+                label_counts = {rec['lab']: rec['cnt'] async for rec in res}
+                
+                total = sum(label_counts.values())
+                entropy = 0.0
+                if total > 0:
+                    for c in label_counts.values():
+                        p = c / total
+                        entropy -= p * math.log(p, 2)
+                return round(entropy, 4)
+        except Exception as e:
+            logger.error(f"Failed to compute label entropy: {str(e)}")
+            return 0.0

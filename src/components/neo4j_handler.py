@@ -6,6 +6,7 @@ from ..core.logger import get_logger
 from langchain_openai import OpenAIEmbeddings
 import uuid
 import logging
+import asyncio
 
 logger = get_logger(__name__)
 
@@ -30,9 +31,6 @@ class Neo4jHandler:
         )
 
         logger.info(f"Initialized Neo4j handler for run UUID: {run_uuid}")
-
-        # Initialize schema and constraints
-        # asyncio.create_task(self._initialize_database())
 
     async def verify_connection(self) -> bool:
         """Verify that Neo4j is accessible by running a simple query"""
@@ -320,7 +318,6 @@ class Neo4jHandler:
         
         try:
             # Generate embeddings asynchronously for all chunks
-            import asyncio
             embedding_tasks = []
             for chunk_data in batch_data:
                 content = chunk_data.get('content', '')
@@ -454,86 +451,238 @@ class Neo4jHandler:
         inter_links = operations.get('inter_chunk_relations') or []
         prunes = operations.get('prune_instructions') or []
 
-        # 1) Merges
+        # 1) Merges first (to consolidate entities before linking/pruning)
         if merges:
             logger.info(f"Applying {len(merges)} merge instructions")
             for m in merges:
                 local = m.get('local')
                 existing = m.get('existing')
-                existing_id = m.get('existing_id')
+                existing_id = m.get('existing_id')  # Not used in query, but logged
+                if local == existing:  # Skip self-merges
+                    logger.debug(f"Skipping self-merge: {local} -> {existing}")
+                    continue
                 try:
-                    # Try APOC merge (best effort). If APOC is not available, fallback to copying FROM_CHUNK and source_chunk_ids and deleting local.
+                    # Try APOC merge if available (best effort)
                     apoc_query = """
-                    MATCH (l:Entity:GraphNode {name: $local, graph_uuid: $graph_uuid})
-                    MATCH (e:Entity:GraphNode {name: $existing, graph_uuid: $graph_uuid})
-                    CALL apoc.refactor.mergeNodes([l,e], {properties:'combine', mergeRels:true}) YIELD node
+                    MATCH (l:Entity:GraphNode {graph_uuid: $graph_uuid})
+                    WHERE l.name = $local OR $local IN l.name
+                    MATCH (e:Entity:GraphNode {graph_uuid: $graph_uuid})
+                    WHERE e.name = $existing OR $existing IN e.name
+                    CALL apoc.refactor.mergeNodes([l, e], {properties: {name: $existing}}) YIELD node
+                    SET node.name = $existing
                     RETURN node
                     """
                     await session.run(apoc_query, local=local, existing=existing, graph_uuid=self.run_uuid)
-                except Exception:
-                    # Fallback: transfer FROM_CHUNK relationships and source_chunk_ids
+                    logger.debug(f"APOC merge successful: {local} -> {existing}")
+                except Exception as apoc_err:
+                    logger.debug(f"APOC merge failed for {local} -> {existing}: {apoc_err}")
+                    # Fallback: Manual merge with fixed Cypher structure
                     try:
-                        transfer_query = """
+                        fallback_query = """
+                        // Match local and existing
                         MATCH (l:Entity:GraphNode {name: $local, graph_uuid: $graph_uuid})
                         MATCH (e:Entity:GraphNode {name: $existing, graph_uuid: $graph_uuid})
-                        // transfer FROM_CHUNK edges
-                        WITH l,e
-                        OPTIONAL MATCH (l)-[f:FROM_CHUNK]->(c:Chunk:GraphNode)
-                        FOREACH (r IN CASE WHEN f IS NULL THEN [] ELSE [f] END |
-                          MERGE (e)-[:FROM_CHUNK]->(c)
-                        )
-                        // aggregate chunk ids
-                        WITH l,e
-                        OPTIONAL MATCH (l)-[:FROM_CHUNK]->(c2:Chunk:GraphNode)
-                        WITH e, collect(DISTINCT c2.id) as new_chunks
+                        
+                        // Transfer relationships (outgoing from local to existing)
+                        MATCH (l)-[rel_out:GraphRel]->(target)
+                        WHERE rel_out.graph_uuid = $graph_uuid
+                        MERGE (e)-[:`{rel_type}` {{graph_uuid: $graph_uuid}}]->(target)
+                        SET {props}
+                        DELETE rel_out
+                        
+                        // Transfer incoming relationships (to local from source to existing)
+                        MATCH (source)-[rel_in:GraphRel]-(l)
+                        WHERE rel_in.graph_uuid = $graph_uuid
+                        MERGE (source)-[:`{rel_type_in}` {{graph_uuid: $graph_uuid}}]-(e)
+                        SET {props_in}
+                        DELETE rel_in
+                        
+                        // Transfer FROM_CHUNK relationships
+                        MATCH (l)-[:FROM_CHUNK]->(c:Chunk:GraphNode)
+                        MERGE (e)-[:FROM_CHUNK]->(c)
+                        WITH e, collect(DISTINCT c.id) AS new_chunks
                         SET e.source_chunk_ids = coalesce(e.source_chunk_ids, []) + new_chunks
-                        // remove local node
-                        WITH l
+                        
+                        // Combine properties (excluding id/name)
+                        WITH l, e
+                        SET e += apoc.map.removeKey(l, 'name'),
+                            e.updated_at = datetime()
+                        
+                        // Delete local node
                         DETACH DELETE l
                         """
-                        await session.run(transfer_query, local=local, existing=existing, graph_uuid=self.run_uuid)
-                    except Exception as e:
-                        logger.warning(f"Fallback merge failed for {local} -> {existing}: {e}")
+                        # Note: This is a simplified version; for full rel transfer, we'd need dynamic rel types.
+                        # For now, use a batched approach or log for manual review.
+                        simple_transfer_query = """
+                        MATCH (l:Entity:GraphNode {graph_uuid: $graph_uuid})
+                        WHERE l.name = $local OR $local IN l.name
+                        MATCH (e:Entity:GraphNode {graph_uuid: $graph_uuid})
+                        WHERE e.name = $existing OR $existing IN e.name
+                        
+                        // Transfer FROM_CHUNK
+                        MATCH (l)-[f:FROM_CHUNK]->(c:Chunk:GraphNode)
+                        CREATE (e)-[:FROM_CHUNK]->(c)
+                        DELETE f
+                        
+                        // Aggregate and set chunk ids on existing
+                        WITH e
+                        OPTIONAL MATCH (l)-[:FROM_CHUNK]->(c2:Chunk:GraphNode)
+                        WITH e, collect(DISTINCT c2.id) AS new_chunks
+                        SET e.source_chunk_ids = coalesce(e.source_chunk_ids, []) + new_chunks
+                        
+                        // Combine scalar properties (add timestamp for tracking)
+                        WITH l, e
+                        SET e += l {
+                            .*, 
+                            name: $existing, 
+                            merged_from: coalesce(e.merged_from, []) + $local
+                        },
+                        e.updated_at = datetime()
+                        
+                        // Delete local (after transfer)
+                        DETACH DELETE l
+                        """
+                        await session.run(simple_transfer_query, local=local, existing=existing, graph_uuid=self.run_uuid)
+                        logger.debug(f"Fallback merge successful: {local} -> {existing}")
+                    except Exception as fallback_err:
+                        logger.warning(f"Fallback merge failed for {local} -> {existing}: {fallback_err}")
+                        # Ultimate fallback: Just delete local if isolated
+                        try:
+                            await session.run(
+                                "MATCH (l:Entity:GraphNode {graph_uuid: $graph_uuid}) WHERE l.name = $local OR $local IN l.name DETACH DELETE l",
+                                local=local, graph_uuid=self.run_uuid
+                            )
+                            logger.info(f"Force-deleted isolated local entity: {local}")
+                        except Exception as force_err:
+                            logger.error(f"Even force-delete failed for {local}: {force_err}")
 
-        # 2) Inter-chunk relations
+        # 2) Prunes (now after merges, to target correct entities)
+        if prunes:
+            logger.info(f"Applying {len(prunes)} prune instructions")
+            for p in prunes:
+                try:
+                    # Check if this is an entity prune or relationship prune
+                    if 'entity' in p:
+                        # Entity prune: delete entity and all its relationships
+                        entity_name = p.get('entity')
+                        if not entity_name:
+                            continue
+                        
+                        result = await session.run(
+                            """
+                            MATCH (n:Entity:GraphNode {graph_uuid: $graph_uuid})
+                            WHERE n.name = $entity_name OR $entity_name IN n.name
+                            DETACH DELETE n
+                            RETURN count(n) as deleted
+                            """,
+                            entity_name=entity_name, graph_uuid=self.run_uuid
+                        )
+                        record = await result.single()
+                        deleted = record.get('deleted', 0) if record else 0
+                        if deleted > 0:
+                            logger.debug(f"Pruned entity and all its relationships: {entity_name}")
+                        else:
+                            logger.debug(f"No matching entity found to prune: {entity_name}")
+                    
+                    elif 'head' in p and 'relation' in p and 'tail' in p:
+                        # Relationship prune: delete specific relationship
+                        head = p.get('head')
+                        rel = p.get('relation')
+                        tail = p.get('tail')
+                        if not head or not rel or not tail:
+                            continue
+                        
+                        rel_label = rel.replace(' ', '_').upper()
+                        result = await session.run(
+                            f"""
+                            MATCH (h:Entity:GraphNode {{graph_uuid: $graph_uuid}})
+                            WHERE h.name = $head OR $head IN h.name
+                            MATCH (t:Entity:GraphNode {{graph_uuid: $graph_uuid}})
+                            WHERE t.name = $tail OR $tail IN t.name
+                            MATCH (h)-[r:`{rel_label}`]-(t)
+                            DETACH DELETE r
+                            RETURN count(r) as deleted
+                            """,
+                            head=head, tail=tail, graph_uuid=self.run_uuid
+                        )
+                        record = await result.single()
+                        deleted = record.get('deleted', 0) if record else 0
+                        if deleted > 0:
+                            logger.debug(f"Pruned relationship: {head} -[{rel}]-> {tail}")
+                        else:
+                            logger.debug(f"No matching relationship found to prune: {head} -[{rel}]-> {tail}")
+                    
+                    else:
+                        logger.warning(f"Invalid prune instruction format: {p}")
+                        
+                except Exception as e:
+                    logger.warning(f"Failed to prune {p}: {e}")
+
+        # 3) Inter-chunk relations (last, after cleaning)
         if inter_links:
             logger.info(f"Applying {len(inter_links)} inter-chunk relations")
             for it in inter_links:
                 try:
+                    if len(it) < 3:
+                        continue
                     head = it[0]
                     rel = it[1]
                     tail = it[2]
                     source_chunks = it[3] if len(it) > 3 and isinstance(it[3], list) else []
                     rel_label = rel.replace(' ', '_').upper()
                     query = f"""
-                    MATCH (h:Entity:GraphNode {{name: $head, graph_uuid: $graph_uuid}})
-                    MATCH (t:Entity:GraphNode {{name: $tail, graph_uuid: $graph_uuid}})
+                    MATCH (h:Entity:GraphNode {{graph_uuid: $graph_uuid}})
+                    WHERE h.name = $head OR $head IN h.name
+                    MATCH (t:Entity:GraphNode {{graph_uuid: $graph_uuid}})
+                    WHERE t.name = $tail OR $tail IN t.name
                     MERGE (h)-[r:`{rel_label}` {{graph_uuid: $graph_uuid}}]->(t)
                     SET r.source_chunks = coalesce(r.source_chunks, []) + $source_chunks,
                         r.batch_id = $batch_idx
+                    RETURN count(r) as created
                     """
-                    await session.run(query, head=head, tail=tail, graph_uuid=self.run_uuid, source_chunks=source_chunks, batch_idx=batch_idx)
+                    result = await session.run(query, head=head, tail=tail, graph_uuid=self.run_uuid, source_chunks=source_chunks, batch_idx=batch_idx)
+                    record = await result.single()
+                    created = record.get('created', 0) if record else 0
+                    if created > 0:
+                        logger.debug(f"Created inter-chunk relation: {head} -[{rel}]-> {tail}")
+                    else:
+                        logger.debug(f"No inter-chunk relation created: {head} -[{rel}]-> {tail}")
                 except Exception as e:
                     logger.warning(f"Failed to create inter-chunk relation {it}: {e}")
 
-        # 3) Prunes (delete specific relationships)
-        if prunes:
-            logger.info(f"Applying {len(prunes)} prune instructions")
-            for p in prunes:
-                try:
-                    head = p.get('head')
-                    rel = p.get('relation')
-                    tail = p.get('tail')
-                    source_id = p.get('source_id')
-                    rel_label = rel.replace(' ', '_').upper()
-                    prune_query = f"""
-                    MATCH (h:Entity:GraphNode {{name: $head, graph_uuid: $graph_uuid}})-[r:`{rel_label}`]->(t:Entity:GraphNode {{name: $tail, graph_uuid: $graph_uuid}})
-                    WHERE $source_id IN coalesce(r.source_chunks, [])
-                    DELETE r
-                    """
-                    await session.run(prune_query, head=head, tail=tail, graph_uuid=self.run_uuid, source_id=source_id)
-                except Exception as e:
-                    logger.warning(f"Failed to prune {p}: {e}")
+        # Post-cleanup: Optional aggressive cleanup (e.g., remove isolated nodes with degree < 1)
+        await self._cleanup_isolated_nodes(session)
+
+    async def _cleanup_isolated_nodes(self, session):
+        """Aggressively remove isolated nodes (degree 0) to clean the graph"""
+        try:
+            # Delete isolated Entity nodes (no relationships)
+            result = await session.run("""
+                MATCH (n:Entity:GraphNode)
+                WHERE n.graph_uuid = $graph_uuid
+                AND NOT (n)--()
+                DETACH DELETE n
+                RETURN count(n) as deleted
+            """, graph_uuid=self.run_uuid)
+            record = await result.single()
+            deleted_entities = record.get('deleted', 0) if record else 0
+            if deleted_entities > 0:
+                logger.info(f"Cleaned {deleted_entities} isolated Entity nodes")
+
+            # Delete isolated Chunk nodes (no incoming FROM_CHUNK)
+            result = await session.run("""
+                MATCH (c:Chunk:GraphNode)
+                WHERE c.graph_uuid = $graph_uuid
+                AND NOT ()-[:FROM_CHUNK]->(c)
+                DETACH DELETE c
+                RETURN count(c) as deleted
+            """, graph_uuid=self.run_uuid)
+            record = await result.single()
+            deleted_chunks = record.get('deleted', 0) if record else 0
+            if deleted_chunks > 0:
+                logger.info(f"Cleaned {deleted_chunks} isolated Chunk nodes")
+        except Exception as e:
+            logger.warning(f"Graph cleanup failed: {e}")
 
     async def get_node_count(self) -> int:
         """Get the count of nodes in the current graph run"""

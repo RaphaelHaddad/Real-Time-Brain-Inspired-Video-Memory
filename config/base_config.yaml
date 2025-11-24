@@ -20,7 +20,7 @@ llm_injector:
   temperature: 0.05
   top_p: 0.9
   max_tokens: 8192
-  subgraph_extraction_injection: false
+  subgraph_extraction_injection: true
 
 chunking:
   enabled: true
@@ -35,8 +35,8 @@ chunking:
   # Limits for instruction-based global refinement outputs
   max_new_triplets: 20
   max_inter_chunk_relations: 10
-  max_merge_instructions: 5
-  max_prune_instructions: 5
+  max_merge_instructions: 8
+  max_prune_instructions: 8
   # Per-chunk LLM timeout/retry
   chunk_timeout_seconds: 5.0
   chunk_timeout_retries: 3

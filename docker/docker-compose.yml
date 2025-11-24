@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   neo4j:
-    image: neo4j:5-community
+    image: neo4j:5-community  # Or pin to exact version, e.g., neo4j:5.24.0
     container_name: vidgraph-neo4j
     ports:
       - "7687:7687"  # Bolt port
@@ -10,15 +10,16 @@ services:
     environment:
       - NEO4J_AUTH=neo4j/password  # Default user/initial password
       - NEO4J_dbms_security_auth__minimum__password__length=8
-      # - NEO4J_PLUGINS=["graph-data-science"] # Using manual install
+      - NEO4J_PLUGINS='["apoc"]'  # Only load APOC, not GDS
+      # Optional: Other APOC configs, e.g., -Dapoc.export.file.enabled=true
     volumes:
       - neo4j_data:/data
       - neo4j_logs:/logs
       - neo4j_import:/import
-      - ./docker/plugins:/plugins # Mount local plugins folder
-      - ./docker/neo4j_init.cypher:/docker-entrypoint-initdb.d/init.cypher
+      - ./plugins/apoc-5.26.16-core.jar:/plugins/apoc-5.26.16-core.jar  # Mount only APOC JAR
+      - ./neo4j_init.cypher:/docker-entrypoint-initdb.d/init.cypher  # Use for APOC init if needed
     healthcheck:
-      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "password", "RETURN 1;"]
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p password 'RETURN apoc.version() AS version;' | grep -q 'apoc' || exit 1"]  # UPDATED: Tests APOC availability
       interval: 30s
       timeout: 10s
       retries: 5
@@ -28,4 +29,3 @@ volumes:
   neo4j_data:
   neo4j_logs:
   neo4j_import:
-  neo4j_plugins:

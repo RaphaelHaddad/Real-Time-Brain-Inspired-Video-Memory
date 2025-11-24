@@ -112,14 +112,14 @@ Start the Neo4j database using Docker:
 cd docker
 docker compose up -d
 
-Optional: install Graph Data Science (GDS) plugin (recommended)
+Optional: install APOC plugin (recommended)
 
-If you want to enable Graph Data Science algorithms (PageRank, Louvain, WCC, etc.), add the GDS plugin to the Docker container plugins folder and restart the container. Download a GDS JAR compatible with your Neo4j version into the repository `docker/plugins` directory:
+If you want to enable advanced graph operations and procedures (MERGE operations, data manipulation, etc.), add the APOC plugin to the Docker container plugins folder and restart the container. Download the APOC JAR compatible with your Neo4j version into the repository `docker/plugins` directory:
 
 ```bash
 # from the repo root
-curl -L -o docker/plugins/neo4j-graph-data-science-2.14.0.jar \
-  https://graphdatascience.ninja/neo4j-graph-data-science-2.14.0.jar
+curl -L -o docker/plugins/apoc-5.26.16-core.jar \
+  https://github.com/neo4j/apoc/releases/download/5.26.16/apoc-5.26.16-core.jar
 
 # then restart the container
 cd docker
@@ -127,9 +127,9 @@ docker compose down && docker compose up -d
 ```
 
 Notes:
-- Make sure the GDS JAR version is compatible with the Neo4j image you use (check GDS release notes).
+- Make sure the APOC JAR version is compatible with the Neo4j image you use (check APOC release notes).
 - If your Docker host cannot download the plugin automatically, place the JAR in `docker/plugins/` and mount that folder into the container (we do this in the provided `docker/docker-compose.yml`).
-- GDS is available on Enterprise and some Community builds via plugin jars; consult the Neo4j/GDS docs for licensing/compatibility details.
+- APOC provides hundreds of procedures and functions for data integration, graph algorithms, and utility operations; consult the Neo4j/APOC docs for details.
 ```
 
 ### 3. Build Knowledge Graph

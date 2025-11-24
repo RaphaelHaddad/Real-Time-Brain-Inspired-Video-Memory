@@ -99,6 +99,8 @@ class GlobalRefiner:
             prompt = self.prompt_template.format(
                 network_info=network_info or "No graph context available",
                 pre_extracted_triplets=triplets_json,
+                # Ensure template receives limits to avoid KeyErrors if placeholders are present
+                max_new_triplets=getattr(self.chunking_config, 'max_new_triplets', global_limit),
             )
 
             logger.debug(f"Global refinement full input prompt: {prompt}")
@@ -375,7 +377,7 @@ class GlobalRefiner:
                     logger.warning(f"LLM hallucinated {len(parsed_op['prune_instructions'])} prune_instructions despite empty context, forcing to []")
                     parsed_op["prune_instructions"] = []
 
-            # Log concise summaries for inspection (fast operations only)
+            # Log concise summaries for inspection (AFTER sanitization)
             def _log_list(name, items):
                 count = len(items) if items else 0
                 sample = items[:3] if items else []

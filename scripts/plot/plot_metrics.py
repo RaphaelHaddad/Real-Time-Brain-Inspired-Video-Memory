@@ -58,7 +58,9 @@ def make_plots(config: Dict[str, Any]):
     metrics_flags = config.get('metrics', {})
     # Default order for plotting if not explicitly set
     default_metrics_order = [
-        'node_count', 'relationship_count', 'density', 'avg_degree',
+        'node_count', 'relationship_count', 'density', 'avg_degree', 'avg_unique_neighbors',
+        'global_efficiency', 'avg_path_length', 'avg_degree_centrality', 'max_degree_centrality',
+        'avg_betweenness_centrality', 'max_betweenness_centrality', 'degree_assortativity', 'graph_robustness',
         'diameter_estimate', 'clustering_coefficient', 'pagerank_top10_percent',
         'louvain_communities', 'louvain_modularity', 'label_entropy'
     ]

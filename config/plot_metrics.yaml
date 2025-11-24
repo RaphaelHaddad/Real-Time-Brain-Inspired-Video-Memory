@@ -1,8 +1,8 @@
 # List of JSON metrics files to compare (order matters for labels)
 json_files:
-  - path: metrics/injection_9134a88f-b727-446e-a355-b7ca3d542986_batch_metrics_kg.json
+  - path: data/metrics/injection_45e65247-e92a-48d0-a78a-f5267eb7a82b_batch_metrics_kg.json
     label: run_with_injection
-  - path: metrics/non_injection_5f299dbf-75a3-4525-beae-1273408ee632_batch_metrics_kg.json
+  - path: data/metrics/non_injection_c9e3bb63-6754-4df9-9e87-3b305cca6e63_batch_metrics_kg.json
     label: run_without_injection
 
 # Metrics to include in the plots. Set to true to enable.
@@ -11,15 +11,24 @@ metrics:
   relationship_count: true
   density: true
   avg_degree: true
-  diameter_estimate: false
+  avg_unique_neighbors: true
+  global_efficiency: true
+  avg_path_length: true
+  avg_degree_centrality: true
+  max_degree_centrality: true
+  avg_betweenness_centrality: true
+  max_betweenness_centrality: true
+  degree_assortativity: true
+  graph_robustness: true
+  diameter_estimate: true
   clustering_coefficient: true
-  pagerank_top10_percent: false
-  louvain_communities: false
+  pagerank_top10_percent: true
+  louvain_communities: true
   louvain_modularity: true
   label_entropy: true
 
 plot:
-  title: "Metrics comparison"
-  figsize: [12, 8]
+  title: "Network Science Metrics Comparison: Injection vs Non-Injection"
+  figsize: [12, 21]
   save_path: outputs/metrics_comparison.png
   show: false
