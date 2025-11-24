@@ -205,6 +205,13 @@ class KGBuilder:
                     operations=(locals().get('operations') if 'operations' in locals() else None)
                 )
                 neo4j_time = time.perf_counter() - neo4j_start
+                # Validate chunk creation: log counts for quick verification that
+                # chunk nodes were created and, where appropriate, have embeddings
+                try:
+                    chunk_counts = await self.neo4j_handler.get_chunk_counts()
+                    logger.info(f"Chunk node counts: {chunk_counts}")
+                except Exception as e:
+                    logger.debug(f"Unable to fetch chunk counts post-injection: {e}")
 
                 # Run ACS Automata
                 acs_start = time.perf_counter()

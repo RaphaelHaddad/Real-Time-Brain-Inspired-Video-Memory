@@ -1,0 +1,222 @@
+{
+  "statistics": {
+    "total_queries": 30,
+    "correct_answers": 4,
+    "incorrect_answers": 26,
+    "skipped_answers": 0,
+    "accuracy": 0.13333333333333333,
+    "results": []
+  },
+  "results": [
+    {
+      "query": "What color are the gloves worn by the person in the lab?",
+      "groundtruth": "blue",
+      "retrieved_answer": "The context does not mention any gloves worn by the person in the lab. Therefore, it is not possible to determine the color of the gloves.",
+      "context_summary": "Chunks (5):\n  1. The video sequence takes place in a laboratory setting, likely a classroom or research environment, and documents a person presenting a document (score: 0.727) [time: 00:09-00:14]\n  2. . The scene is characterized by a modern lab with white cabinets, a black countertop, and various ...",
+      "is_correct": false
+    },
+    {
+      "query": "What is the title of the document being filled out on the lab bench?",
+      "groundtruth": "AR Glasses Training Chemistry Experiment Report (Simplified Version)",
+      "retrieved_answer": "The context does not provide the title of the document being filled out on the lab bench.",
+      "context_summary": "Chunks (5):\n  1. The video sequence takes place in a laboratory setting, likely a classroom or research environment, and documents a person presenting a document (score: 0.814) [time: 00:09-00:14]\n  2. . The scene is characterized by a modern lab with white cabinets, a black countertop, and various ...",
+      "is_correct": false
+    },
+    {
+      "query": "What chemical is being weighed in the bottle with the red cap?",
+      "groundtruth": "sodium hydroxide",
+      "retrieved_answer": "The context does not specify the chemical in the bottle with the red cap.",
+      "context_summary": "Chunks (5):\n  1. The video sequence captures a series of actions performed by a person in a laboratory setting, likely a chemist or researcher, as they prepare for an experiment (score: 0.829) [time: 01:09-01:14]\n  2. . The frames show a progression of tasks involving the handling of chemicals and t...",
+      "is_correct": false
+    },
+    {
+      "query": "What equipment is used to accurately measure the white powder substance?",
+      "groundtruth": "Mettler Toledo analytical balance",
+      "retrieved_answer": "The equipment used to accurately measure the white powder substance is a precision balance, specifically a \"METTLER TOLEDO\" balance, which is enclosed by a glass draft shield to ensure accurate measurements.",
+      "context_summary": "Chunks (5):\n  1. The video sequence captures a scientific procedure, likely a chemical experiment, taking place in a laboratory setting. The perspective is first-person, showing the hands of the experimenter, who is wearing blue nitrile gloves. (score: 0.763) [time: 01:29-01:34]\n  2. Here is a detai...",
+      "is_correct": true
+    },
+    {
+      "query": "What is the final weight shown on the digital balance after measuring the substance?",
+      "groundtruth": "80.15 grams",
+      "retrieved_answer": "The final weight shown on the digital balance after measuring the substance is 56.303 g, which is the tare weight of the empty beaker. The context does not provide information about the weight of the substance added to the beaker.",
+      "context_summary": "Chunks (5):\n  1. The video sequence captures a scientific procedure, likely a chemical experiment, taking place in a laboratory setting. The perspective is first-person, showing the hands of the experimenter, who is wearing blue nitrile gloves. (score: 0.788) [time: 01:29-01:34]\n  2. Here is a detai...",
+      "is_correct": false
+    },
+    {
+      "query": "What type of glassware is being used to prepare a solution of precise volume?",
+      "groundtruth": "volumetric flask",
+      "retrieved_answer": "The glassware being used to prepare a solution of precise volume is a glass Erlenmeyer flask.",
+      "context_summary": "Chunks (5):\n  1. The sequence of images captures a detailed laboratory procedure, likely a titration or a precise weighing process, from a first-person perspective. The setting is a well-equipped laboratory with various pieces of equipment and reagents. (score: 0.874) [time: 03:24-03:29]\n  2. - **In...",
+      "is_correct": false
+    },
+    {
+      "query": "What is the displayed reading on the balance when the beaker is being tared?",
+      "groundtruth": "-56.301 g",
+      "retrieved_answer": "The context does not provide information about the displayed reading on the balance when the beaker is being tared.",
+      "context_summary": "Chunks (5):\n  1. The video captures a scene in a laboratory setting where a person is preparing for a chemistry experiment (score: 0.858) [time: 00:39-00:44]\n  2. . The central focus is on a person's hand, protected by a blue nitrile glove, as they write on a printed document titled \"AR \u773c\u955c\u8bad\u7ec3\u7528\u5316\u5b66\u5b9e\u9a8c\u62a5\u544a ...",
+      "is_correct": false
+    },
+    {
+      "query": "What personal accessory is visible on the person's wrist while handling lab equipment?",
+      "groundtruth": "gold-colored watch with black strap",
+      "retrieved_answer": "A watch is visible on the person's wrist while handling lab equipment.",
+      "context_summary": "Chunks (5):\n  1. The video sequence takes place in a laboratory setting, likely a classroom or research environment, and documents a person presenting a document (score: 0.821) [time: 00:09-00:14]\n  2. . The scene is characterized by a modern lab with white cabinets, a black countertop, and various ...",
+      "is_correct": false
+    },
+    {
+      "query": "What is the person doing with the volumetric flask after adding the liquid?",
+      "groundtruth": "sealing it with a stopper and shaking it to mix the contents",
+      "retrieved_answer": "After adding the liquid, the person is holding the volumetric flask steady with one hand while using the pipette to carefully transfer the liquid from the wash bottle into the flask.",
+      "context_summary": "Chunks (5):\n  1. The video sequence captures a detailed laboratory procedure, likely the preparation of a solution, from a first-person perspective. The scene is set in a well-equipped laboratory with various pieces of equipment and reagents. (score: 0.853) [time: 05:49-05:54]\n  2. - **Initial State...",
+      "is_correct": false
+    },
+    {
+      "query": "What is the balanced chemical equation for the reaction between aluminum and sodium hydroxide?",
+      "groundtruth": "2Al + 2NaOH + 6H2O \u2192 2Na[Al(OH)4] + 3H2\u2191",
+      "retrieved_answer": "The provided context does not contain information about the balanced chemical equation for the reaction between aluminum and sodium hydroxide. The context describes a laboratory procedure involving weighing a beaker with a cloudy white liquid, but it does not mention aluminum, sodium hydroxide, or any chemical reaction. Therefore, the answer cannot be determined from the given information.",
+      "context_summary": "Chunks (5):\n  1. The video sequence captures a scientific procedure, likely a titration or a similar quantitative analysis, being performed in a laboratory setting. The actions unfold as follows: (score: 0.836) [time: 02:54-02:59]\n  2. - **Initial Setup:** The scene opens with a person wearing blue ...",
+      "is_correct": false
+    },
+    {
+      "query": "Who is observing the experimental procedure in the background wearing a cream-colored sweater?",
+      "groundtruth": "a person with long, dark, curly hair",
+      "retrieved_answer": "The context does not provide information about anyone observing the experimental procedure in the background wearing a cream-colored sweater.",
+      "context_summary": "Chunks (5):\n  1. The video sequence captures a detailed laboratory procedure, likely a titration or a solution preparation, performed by a scientist wearing blue nitrile gloves (score: 0.821) [time: 05:14-05:19]\n  2. . The setting is a well-equipped laboratory with various pieces of equipment and re...",
+      "is_correct": false
+    },
+    {
+      "query": "What material is used to prepare a sample for weighing on the balance?",
+      "groundtruth": "aluminum foil",
+      "retrieved_answer": "Aluminum foil is used to prepare a sample for weighing on the balance.",
+      "context_summary": "Chunks (5):\n  1. The video sequence captures a person preparing to conduct a precise measurement in a laboratory setting. The scene is set in a well-equipped lab with a large black countertop, white cabinets, and various pieces of equipment (score: 0.803) [time: 00:54-00:59]\n  2. . The person, weari...",
+      "is_correct": true
+    },
+    {
+      "query": "What safety equipment is visible on the wall in the laboratory?",
+      "groundtruth": "fire extinguisher",
+      "retrieved_answer": "The context does not mention any safety equipment visible on the wall in the laboratory.",
+      "context_summary": "Chunks (5):\n  1. The video sequence captures a scientific procedure, likely a titration or a similar quantitative analysis, being performed in a laboratory setting. The actions unfold as follows: (score: 0.829) [time: 02:54-02:59]\n  2. - **Initial Setup:** The scene opens with a person wearing blue ...",
+      "is_correct": false
+    },
+    {
+      "query": "What type of measurement is being performed with the burette and graduated cylinder?",
+      "groundtruth": "titration",
+      "retrieved_answer": "The measurement being performed with the burette and graduated cylinder is volume measurement.",
+      "context_summary": "Chunks (5):\n  1. The video sequence captures a detailed laboratory procedure, likely a titration or solution preparation, from a first-person perspective. The scene is set in a well-equipped laboratory with various pieces of equipment and reagents visible. (score: 0.814) [time: 10:03-10:08]\n  2. - *...",
+      "is_correct": false
+    },
+    {
+      "query": "What is the purpose of the glass enclosure around the analytical balance?",
+      "groundtruth": "to protect the sample from air currents and ensure accurate measurements",
+      "retrieved_answer": "The context does not provide information about the purpose of the glass enclosure around the analytical balance.",
+      "context_summary": "Chunks (5):\n  1. The video captures a close-up, first-person perspective of a person conducting a precise laboratory procedure. The central action involves a hand, protected by a blue nitrile glove, carefully handling a glass volumetric flask (score: 0.804) [time: 06:09-06:14]\n  2. . The flask conta...",
+      "is_correct": false
+    },
+    {
+      "query": "What gas is being produced in the chemical reaction shown in the flask on the stirrer?",
+      "groundtruth": "hydrogen gas",
+      "retrieved_answer": "The context indicates that a chemical reaction is taking place in a flask on a magnetic stirrer, with a temperature of 70.0\u00b0C and a long glass tube (likely a condenser or gas delivery tube) inserted into the flask. This suggests that a volatile substance is being produced and may be collected or cooled. However, the specific gas being produced is not identified in the provided information. Therefore, based on the context, it is not possible to determine the exact gas being produced.",
+      "context_summary": "Chunks (5):\n  1. The video captures a continuous process in a laboratory setting, focusing on a chemical experiment. The scene is set on a black laboratory bench, with a glass shelf unit in the background containing various reagents and equipment. (score: 0.866) [time: 12:03-12:08]\n  2. The central ...",
+      "is_correct": false
+    },
+    {
+      "query": "What two main chemicals are used to produce hydrogen gas in this experiment?",
+      "groundtruth": "aluminum and sodium hydroxide",
+      "retrieved_answer": "The context does not provide information about the specific chemicals used to produce hydrogen gas in the experiment.",
+      "context_summary": "Chunks (5):\n  1. The video captures a detailed process of weighing a substance in a laboratory setting, with a person in the background observing. (score: 0.861) [time: 01:34-01:39]\n  2. - **Initial Setup:** The scene is a laboratory with white cabinets, a black countertop, and a glass-enclosed bala...",
+      "is_correct": false
+    },
+    {
+      "query": "What is the purpose of the AR glasses mentioned in the experiment report?",
+      "groundtruth": "to guide or document the chemistry experiment with overlaid instructions and data",
+      "retrieved_answer": "The context does not mention any AR glasses or their purpose in the experiment. Therefore, it is not possible to determine the purpose of AR glasses based on the provided information.",
+      "context_summary": "Chunks (5):\n  1. The video captures a detailed process of weighing a substance in a laboratory setting, with a person in the background observing. (score: 0.868) [time: 01:34-01:39]\n  2. - **Initial Setup:** The scene is a laboratory with white cabinets, a black countertop, and a glass-enclosed bala...",
+      "is_correct": false
+    },
+    {
+      "query": "What color is the sweater worn by the person with curly hair throughout the video?",
+      "groundtruth": "cream-colored or beige",
+      "retrieved_answer": "The person with curly hair is wearing a beige sweater.",
+      "context_summary": "Chunks (5):\n  1. The video sequence captures a detailed laboratory procedure, likely a titration or a precise liquid transfer, performed with care and precision (score: 0.820) [time: 04:14-04:19]\n  2. . The scene is set in a well-equipped laboratory with various pieces of equipment and reagents visi...",
+      "is_correct": true
+    },
+    {
+      "query": "What was the initial amount of aluminum specified in the experiment report for producing hydrogen gas?",
+      "groundtruth": "8g",
+      "retrieved_answer": "The context does not contain information about the initial amount of aluminum specified in the experiment report for producing hydrogen gas.",
+      "context_summary": "No results found for query 'What was the initial amount of aluminum specified in the experiment report for producing hydrogen gas?'",
+      "is_correct": false
+    },
+    {
+      "query": "What equipment is used to continuously mix the contents of the reaction flask?",
+      "groundtruth": "magnetic stirrer",
+      "retrieved_answer": "The context does not mention any equipment used to continuously mix the contents of a reaction flask. Therefore, the answer cannot be determined from the provided information.",
+      "context_summary": "Chunks (5):\n  1. The video sequence captures a scientific procedure, likely a titration or a similar quantitative analysis, being performed in a laboratory setting. The actions unfold as follows: (score: 0.838) [time: 02:54-02:59]\n  2. - **Initial Setup:** The scene opens with a person wearing blue ...",
+      "is_correct": false
+    },
+    {
+      "query": "How does the person ensure accurate measurement when weighing the sodium hydroxide?",
+      "groundtruth": "by using a glass enclosure (draft shield) around the balance to prevent air currents from affecting the measurement",
+      "retrieved_answer": "The context does not provide information about how the person ensures accurate measurement when weighing sodium hydroxide.",
+      "context_summary": "Chunks (5):\n  1. The video captures a close-up, first-person view of a laboratory procedure being performed on a black countertop. The central action involves a person wearing blue nitrile gloves, who is carefully handling a piece of laboratory equipment. (score: 0.813) [time: 12:43-12:48]\n  2. - **...",
+      "is_correct": false
+    },
+    {
+      "query": "What safety symbols are visible on the sodium hydroxide bottle?",
+      "groundtruth": "corrosive hazard symbols indicating it can cause severe skin burns and eye damage",
+      "retrieved_answer": "The context does not provide any information about safety symbols on the sodium hydroxide bottle.",
+      "context_summary": "Chunks (5):\n  1. The video sequence captures a scientific procedure, likely a titration or a similar chemical analysis, being performed in a laboratory setting. The process involves the precise measurement of a substance and the addition of a reagent. (score: 0.796) [time: 02:34-02:39]\n  2. Here is ...",
+      "is_correct": false
+    },
+    {
+      "query": "What technique is used to transfer small amounts of liquid precisely in the experiment?",
+      "groundtruth": "pipetting",
+      "retrieved_answer": "The technique used to transfer small amounts of liquid precisely in the experiment is using a pipette or dropper to add liquid to a volumetric flask, with careful attention to the meniscus at eye level for accuracy.",
+      "context_summary": "Chunks (5):\n  1. The video captures a scene in a laboratory where a person is performing a precise liquid measurement. The sequence of frames shows a close-up of a person's hands, protected by blue nitrile gloves, handling a piece of laboratory glassware. (score: 0.874) [time: 07:28-07:33]\n  2. - In...",
+      "is_correct": true
+    },
+    {
+      "query": "What was the purpose of the document being filled out at the beginning of the experiment?",
+      "groundtruth": "to record observations and data for the chemistry experiment involving hydrogen gas production",
+      "retrieved_answer": "The context does not provide information about a document being filled out at the beginning of the experiment. Therefore, the purpose of such a document cannot be determined from the given information.",
+      "context_summary": "Chunks (5):\n  1. The video sequence captures a precise laboratory procedure, likely a titration or a similar quantitative analysis, from a first-person perspective (score: 0.904) [time: 05:34-05:39]\n  2. . The scene is set in a well-equipped laboratory with white shelving units, a door, and a wall-m...",
+      "is_correct": false
+    },
+    {
+      "query": "What was the measured volume of gas produced in the chemical reaction?",
+      "groundtruth": "2mL and 100mL",
+      "retrieved_answer": "The context does not provide a specific measured volume of gas produced in the chemical reaction.",
+      "context_summary": "Chunks (5):\n  1. The video captures a sequence of events in a laboratory setting, focusing on a scientific experiment involving a chemical reaction or a process that requires controlled conditions. Here is a detailed description of the events: (score: 0.855) [time: 12:13-12:18]\n  2. - **Initial Setu...",
+      "is_correct": false
+    },
+    {
+      "query": "What type of stirrer is used to mix the cloudy white solution in the later part of the video?",
+      "groundtruth": "magnetic stirrer",
+      "retrieved_answer": "The context does not provide information about a stirrer being used to mix a cloudy white solution in the later part of the video. Therefore, it is not possible to determine the type of stirrer used.",
+      "context_summary": "Chunks (5):\n  1. The video sequence captures a detailed laboratory procedure, likely a titration or a precise liquid transfer, performed with care and precision (score: 0.855) [time: 04:14-04:19]\n  2. . The scene is set in a well-equipped laboratory with various pieces of equipment and reagents visi...",
+      "is_correct": false
+    },
+    {
+      "query": "What is the concentration of the sodium hydroxide solution mentioned in the experiment?",
+      "groundtruth": "2mol/L",
+      "retrieved_answer": "The context does not provide information about the concentration of the sodium hydroxide solution.",
+      "context_summary": "Chunks (5):\n  1. The video sequence captures a precise laboratory procedure, likely a titration or a similar quantitative analysis, from a first-person perspective (score: 0.859) [time: 05:34-05:39]\n  2. . The scene is set in a well-equipped laboratory with white shelving units, a door, and a wall-m...",
+      "is_correct": false
+    },
+    {
+      "query": "What type of warning sign is visible on the wall of the laboratory?",
+      "groundtruth": "High Voltage warning sign",
+      "retrieved_answer": "The warning sign visible on the wall of the laboratory indicates the location of the fire extinguisher.",
+      "context_summary": "Chunks (5):\n  1. The video sequence captures a person preparing to conduct a precise measurement in a laboratory setting. The scene is set in a well-equipped lab with a large black countertop, white cabinets, and various pieces of equipment (score: 0.838) [time: 00:54-00:59]\n  2. . The person, weari...",
+      "is_correct": false
+    },
+    {
+      "query": "What equipment is used to collect gas produced by the reaction in the experiment?",
+      "groundtruth": "a tube connected to a container filled with water (gas collection by water displacement)",
+      "retrieved_answer": "The context does not provide information about equipment used to collect gas produced by a reaction. The described experiment involves transferring liquid using a pipette into a volumetric or conical flask, with measurements taken on a digital balance. There is no mention of gas collection equipment.",
+      "context_summary": "Chunks (5):\n  1. The video sequence captures a precise laboratory procedure, likely a titration or a similar quantitative analysis, from a first-person perspective (score: 0.892) [time: 05:34-05:39]\n  2. . The scene is set in a well-equipped laboratory with white shelving units, a door, and a wall-m...",
+      "is_correct": false
+    }
+  ]
+}

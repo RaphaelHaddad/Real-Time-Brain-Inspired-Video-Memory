@@ -223,6 +223,7 @@ class Neo4jHandler:
                 chunk_id = chunk["id"]
                 content = chunk["content"]
                 embedding = chunk.get("embedding")
+                chunk_index = chunk.get("index") if (isinstance(chunk.get("index"), int) or isinstance(chunk.get("index"), str)) else None
                 
                 # Create chunk node
                 if embedding:
@@ -266,9 +267,17 @@ class Neo4jHandler:
 
                     # Match if either the full chunk_id or the short form appears in the triplet's source list
                     matched = False
+                    # 1) Full chunk_id match (uuid_batch_idx)
                     if chunk_id in source_chunks_str:
                         matched = True
+                    # 2) Short form match (batch_idx_chunk_idx)
                     elif short_id and short_id in source_chunks_str:
+                        matched = True
+                    # 3) direct numeric/index match (triplets may use integer index or string of index)
+                    elif chunk_index is not None and (str(chunk_index) in source_chunks_str or chunk_index in source_chunks):
+                        matched = True
+                    # 4) If a source chunk contains a trailing short id part (e.g., runuuid_0_3 vs 0_3), try suffix match
+                    elif any(sc.endswith(f"_{chunk_index}") or sc.endswith(f"_{short_id}") for sc in source_chunks_str if sc):
                         matched = True
 
                     if not matched:
@@ -668,19 +677,13 @@ class Neo4jHandler:
             deleted_entities = record.get('deleted', 0) if record else 0
             if deleted_entities > 0:
                 logger.info(f"Cleaned {deleted_entities} isolated Entity nodes")
-
-            # Delete isolated Chunk nodes (no incoming FROM_CHUNK)
-            result = await session.run("""
-                MATCH (c:Chunk:GraphNode)
-                WHERE c.graph_uuid = $graph_uuid
-                AND NOT ()-[:FROM_CHUNK]->(c)
-                DETACH DELETE c
-                RETURN count(c) as deleted
-            """, graph_uuid=self.run_uuid)
-            record = await result.single()
-            deleted_chunks = record.get('deleted', 0) if record else 0
-            if deleted_chunks > 0:
-                logger.info(f"Cleaned {deleted_chunks} isolated Chunk nodes")
+            # NOTE: We intentionally DO NOT delete isolated Chunk nodes here.
+            # Chunks may be generated independently (e.g., by VLM or external chunker)
+            # and can still be useful for vector-based retrieval even if no
+            # FROM_CHUNK relationships were created (or created using different
+            # id formats). Deleting isolated chunks caused hybrid retrieval to
+            # return no chunk seeds; keep them to ensure vector search works.
+            logger.debug("Skipping deletion of isolated Chunk nodes to preserve vector-searchable chunks")
         except Exception as e:
             logger.warning(f"Graph cleanup failed: {e}")
 
@@ -697,6 +700,33 @@ class Neo4jHandler:
         except Exception as e:
             logger.error(f"Error getting node count: {str(e)}")
             return 0
+
+    async def get_chunk_counts(self) -> Dict[str, int]:
+        """Return a breakdown of chunks in the current run: total, with embeddings, and linked chunks"""
+        try:
+            async with self.driver.session() as session:
+                total_res = await session.run(
+                    "MATCH (c:Chunk:GraphNode) WHERE c.graph_uuid = $graph_uuid RETURN count(c) as count",
+                    graph_uuid=self.run_uuid
+                )
+                total = (await total_res.single())["count"] if total_res else 0
+
+                emb_res = await session.run(
+                    "MATCH (c:Chunk:GraphNode) WHERE c.graph_uuid = $graph_uuid AND c.embedding IS NOT NULL RETURN count(c) as count",
+                    graph_uuid=self.run_uuid
+                )
+                with_emb = (await emb_res.single())["count"] if emb_res else 0
+
+                linked_res = await session.run(
+                    "MATCH (c:Chunk:GraphNode)<-[:FROM_CHUNK]-(:Entity) WHERE c.graph_uuid = $graph_uuid RETURN count(DISTINCT c) as count",
+                    graph_uuid=self.run_uuid
+                )
+                linked = (await linked_res.single())["count"] if linked_res else 0
+
+                return {"total_chunks": int(total), "with_embedding": int(with_emb), "linked_chunks": int(linked)}
+        except Exception as e:
+            logger.warning(f"Failed to get chunk counts: {e}")
+            return {"total_chunks": 0, "with_embedding": 0, "linked_chunks": 0}
 
     async def get_relationship_count(self) -> int:
         """Get the count of relationships in the current graph run"""

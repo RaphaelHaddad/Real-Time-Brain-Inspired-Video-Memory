@@ -94,6 +94,8 @@ flowchart LR
 
 Left column (first entry) shows the current MVP run with **13% accuracy**; more placements will be added here after future improvements.
 
+Latest benchmark (subgraph-context in LLM injector): **26.67% accuracy** (8/30). This result reflects the run where the injector included subgraph context during batch injection and the hybrid retrieval pipeline was evaluated using the benchmark tool.
+
 ## Usage
 
 ### 1. Run VLM Extraction (Before starting Neo4j)

@@ -12,3 +12,4 @@ docker/plugins/apoc-5.26.16-core.jar
 scripts/plot/__pycache__
 injection_run.log
 docker/plugins_new/apoc-5.26.16-core.jar
+data/export_graph/pruned
