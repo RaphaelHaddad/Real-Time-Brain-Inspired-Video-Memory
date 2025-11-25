@@ -3,6 +3,7 @@ import copy
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
+import networkx as nx
 
 class Graph:
     def __init__(self, graph_data):
@@ -65,18 +66,62 @@ class Graph:
         return most_representative_idx
 
     def _are_same_context(self, relation_sentences, threshold=0.8):
-        '''
-        Decide whether the relations represent same context or not, 
-        if they don't reprsent same context we don't prune the relation. 
-        For now it finds if there are at least two same context relations.
-        '''
+        """
+        Determine representative relation and outliers.
+        Steps:
+        1. Compute similarity matrix.
+        2. Build graph: edge exists if similarity >= threshold.
+        3. Each connected component = cluster of similar relations.
+        4. Largest cluster = main meaning.
+        5. Choose the representative from the largest cluster.
+        
+        Returns:
+            should_prune (bool)
+            representative_idx (int)
+            outlier_indices (list[int])
+        """
         if len(relation_sentences) <= 1:
-            return False
+                return False, None, list(range(len(relation_sentences)))
+
+        # 1. Encode embeddings
         embeddings = self.embedding_model.encode(relation_sentences)
         similarity_matrix = cosine_similarity(embeddings)
-        np.fill_diagonal(similarity_matrix, 0)
+
+        # 2. Build graph based on similarity threshold
+        G = nx.Graph()
+        G.add_nodes_from(range(len(relation_sentences)))
+
+        for i in range(len(relation_sentences)):
+            for j in range(i + 1, len(relation_sentences)):
+                if similarity_matrix[i][j] >= threshold:
+                    G.add_edge(i, j)
+
+        # 3. Extract clusters (connected components)
+        clusters = [list(c) for c in nx.connected_components(G)]
         
-        return np.any(similarity_matrix > threshold)
+        # If every sentence is isolated → no pruning (each is an outlier)
+        if all(len(c) == 1 for c in clusters):
+            return False, None, list(range(len(relation_sentences)))
+
+        # 4. Identify the main cluster (largest)
+        clusters_sorted = sorted(clusters, key=len, reverse=True)
+        main_cluster = clusters_sorted[0]
+
+        # 5. Determine representative inside the main cluster
+        main_embeddings = embeddings[main_cluster]
+        centroid = np.mean(main_embeddings, axis=0)
+        sims_to_centroid = cosine_similarity([centroid], main_embeddings)[0]
+        rep_local_idx = np.argmax(sims_to_centroid)
+        representative_idx = main_cluster[rep_local_idx]
+
+        # 6. Remaining clusters = outliers
+        outlier_indices = []
+        for cluster in clusters_sorted[1:]:
+            outlier_indices.extend(cluster)
+
+        should_prune = len(main_cluster) > 1  # prune only if at least 2 similar
+
+        return should_prune, representative_idx, outlier_indices
 
     def prune_graph(self, similarity_threshold=0.8):
         processed_pairs = set()
@@ -114,12 +159,21 @@ class Graph:
                         rel_type = r['type'].replace("_", " ")
                         sentence = f"{r['from_node']} {rel_type} {r['to_node']}"
                         relation_sentences.append(sentence)
-                    if self._are_same_context(relation_sentences, similarity_threshold):
-                        representative_idx = self._get_representative_relation(
-                            relation_sentences, 
-                        )
+                    should_prune, representative_idx, outlier_indices = self._are_same_context(
+                        relation_sentences, similarity_threshold
+                    )
+                    print("\nSHOULD PRUNE: \n", should_prune )
+                    
+                    if should_prune:
+                        # Keep the most representative relation from similar cluster
                         new_relationships.append(direction_relations[representative_idx])
-                        print(f"Pruned {len(direction_relations)} similar relations to 1 between {direction_relations[0]['from_node']} → {direction_relations[0]['to_node']}")
+                        
+                        # Keep all outlier relations
+                        for outlier_idx in outlier_indices:
+                            new_relationships.append(direction_relations[outlier_idx])
+                        
+                        kept_count = 1 + len(outlier_indices)
+                        print(f"Pruned {len(direction_relations)} relations to {kept_count} between {direction_relations[0]['from_node']} → {direction_relations[0]['to_node']} (kept {len(outlier_indices)} outliers)")
                     else:
                         new_relationships.extend(direction_relations)
         
@@ -128,7 +182,7 @@ class Graph:
         
 
 def main():
-    input_file = "data/outputs/exported_graph_8679eaa5-1b21-4975-b7d6-c86e3a9c958d.json"
+    input_file = "data/export_graph/exported_graph_mvp_8679eaa5-1b21-4975-b7d6-c86e3a9c958d.json"
     output_file = "data/outputs/pruned_with_embedding_graph_8679eaa5-1b21-4975-b7d6-c86e3a9c958d.json"
 
     with open(input_file, 'r', encoding='utf-8') as f:
