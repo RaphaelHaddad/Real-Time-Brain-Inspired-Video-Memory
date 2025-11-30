@@ -1,9 +1,9 @@
 # List of JSON metrics files to compare (order matters for labels)
 json_files:
-  - path: data/metrics/injection_45e65247-e92a-48d0-a78a-f5267eb7a82b_batch_metrics_kg.json
-    label: run_with_injection
-  - path: data/metrics/non_injection_c9e3bb63-6754-4df9-9e87-3b305cca6e63_batch_metrics_kg.json
-    label: run_without_injection
+  - path: data/metrics/sub_graph_4fd0a841-a1f1-4bee-9359-4a5982bc3df9.json
+    label: subgraph_injection
+  - path: data/metrics/mvp_93e9c82e-95d6-4864-8ac1-2ae70edfd961.json
+    label: mvp
 
 # Metrics to include in the plots. Set to true to enable.
 metrics:

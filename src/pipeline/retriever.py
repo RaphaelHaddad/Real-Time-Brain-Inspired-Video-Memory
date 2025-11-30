@@ -6,7 +6,7 @@ from typing import List, Dict, Any, Optional
 from ..core.config import RetrievalConfig
 from ..components.neo4j_handler import Neo4jHandler
 from ..core.logger import get_logger
-from .retriever_hybrid import HybridRetriever
+from .retriever_hybrid import HybridRetriever, RerankerError
 
 logger = get_logger(__name__)
 
@@ -254,15 +254,18 @@ class OfflineRetriever:
         from ..components.neo4j_handler import Neo4jHandler
         self.neo4j_handler = Neo4jHandler(self.neo4j_config, self.kg_config, graph_uuid)
 
-    async def retrieve(self, query: str, graph_uuid: str, groundtruth: str = "") -> Dict[str, Any]:
+    async def retrieve(self, query: str, graph_uuid: str, groundtruth: str = "", true_chunks: List[int] = None) -> Dict[str, Any]:
         """Perform offline retrieval against the specified graph"""
         await self.initialize_for_graph(graph_uuid)
 
         start_time = time.perf_counter()
         try:
-            # Perform the retrieval
-            retrieval_result = await self._perform_retrieval(query)
+            # Perform the retrieval and pass true_chunks info
+            retrieval_result, reranking_performed = await self._perform_retrieval(query, true_chunks)
             retrieval_time = time.perf_counter() - start_time
+
+            if reranking_performed:
+                print("Reranking successful")
 
             result = {
                 "query": query,
@@ -283,6 +286,10 @@ class OfflineRetriever:
 
             return result
 
+        except RerankerError:
+            # For offline retrieval, a RerankerError should bubble up and abort the batch
+            logger.error("Reranker failed (strict mode). Aborting retrieval and propagating error.")
+            raise
         except Exception as e:
             logger.error(f"Error in offline retrieval: {str(e)}")
             return {
@@ -306,8 +313,20 @@ class OfflineRetriever:
             for item in queries_data:
                 query = item.get('query', '')
                 groundtruth = item.get('groundtruth', '')
-                
-                result = await self.retrieve(query, graph_uuid, groundtruth)
+                # Allow item to provide optional true_chunks array
+                true_chunks = item.get('true_chunks') or item.get('true_chunk')
+                parsed_true_chunks = None
+                if true_chunks:
+                    try:
+                        if isinstance(true_chunks, list):
+                            parsed_true_chunks = [int(x) for x in true_chunks]
+                        elif isinstance(true_chunks, str):
+                            parts = [p.strip() for p in true_chunks.strip('[]').split(',') if p.strip()]
+                            parsed_true_chunks = [int(x) for x in parts]
+                    except Exception:
+                        parsed_true_chunks = None
+
+                result = await self.retrieve(query, graph_uuid, groundtruth, parsed_true_chunks)
                 results.append(result)
             
             return results
@@ -315,10 +334,10 @@ class OfflineRetriever:
             logger.error(f"Error in batch offline retrieval: {str(e)}")
             return []
 
-    async def _perform_retrieval(self, query: str) -> str:
-        """Perform a retrieval query using the hybrid search logic"""
+    async def _perform_retrieval(self, query: str, true_chunks: List[int] = None) -> tuple[str, bool]:
+        """Perform a retrieval query using the hybrid search logic, with optional true_chunks tracking"""
         hybrid = HybridRetriever(self.config, self.neo4j_handler, schedule_path=None, realtime_output=False)
-        return await hybrid._perform_hybrid_retrieval(query)
+        return await hybrid._perform_hybrid_retrieval(query, true_chunks)
 
     async def _rerank_results(self, query: str, nodes: List[Dict]) -> List[Dict]:
         """Apply reranking to the retrieval results if a reranker is configured"""

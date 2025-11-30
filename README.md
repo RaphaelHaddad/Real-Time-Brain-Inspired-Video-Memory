@@ -391,7 +391,7 @@ For offline retrieval, use a JSON file with the following structure:
 Run batch retrieval from a JSON input file:
 
 ```bash
-python3 -m src.cli.main batch-retrieve --config config/base_config.yaml --graph-uuid <graph-uuid> --input input_queries.json --output results.json
+python3 -m src.cli.main batch-retrieve --config config/base_config.yaml --graph-uuid <graph-uuid> --input ./data/groundtruth/retrieval_offline.json --output results.json
 ```
 
 The output will be a JSON file with the following consistent format:

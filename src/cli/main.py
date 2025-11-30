@@ -7,6 +7,7 @@ import argparse
 from pathlib import Path
 import sys
 import json
+from datetime import datetime
 
 # Add the src directory to the path so we can import modules
 sys.path.insert(0, str(Path(__file__).parent))
@@ -48,7 +49,7 @@ async def run_kg_construction(config_path: str, vlm_json_path: str, retrieval_sc
 
     return graph_uuid
 
-async def run_offline_retrieval(config_path: str, graph_uuid: str, query: str, groundtruth: str = ""):
+async def run_offline_retrieval(config_path: str, graph_uuid: str, query: str, groundtruth: str = "", true_chunks: list = None):
     """Run offline retrieval against a specific graph"""
     from src.pipeline.retriever import OfflineRetriever
 
@@ -60,7 +61,7 @@ async def run_offline_retrieval(config_path: str, graph_uuid: str, query: str, g
     logger.info(f"Ground truth: {groundtruth}")
 
     retriever = OfflineRetriever(config.retrieval, config.neo4j, config.kg)
-    result = await retriever.retrieve(query, graph_uuid, groundtruth)
+    result = await retriever.retrieve(query, graph_uuid, groundtruth, true_chunks)
 
     logger.info(f"Retrieval result: {result}")
     return result
@@ -86,6 +87,42 @@ async def run_batch_offline_retrieval(config_path: str, graph_uuid: str, input_f
         json.dump(results, f, indent=2)
 
     logger.info(f"Batch retrieval completed with {len(results)} results")
+
+    # Save retrieval timing metrics to metrics/<graph_uuid>_retrieval_times_<timestamp>.json
+    try:
+        metrics_dir = Path('metrics')
+        metrics_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')
+        metrics_file = metrics_dir / f"retrieval_times_{graph_uuid}_{timestamp}.json"
+
+        # Prepare metrics summary
+        per_query = []
+        total_time = 0.0
+        for item in results:
+            rt = item.get('retrieval_time', 0.0) or 0.0
+            per_query.append({
+                'query': item.get('query', ''),
+                'groundtruth': item.get('groundtruth', ''),
+                'retrieval_time': rt
+            })
+            total_time += float(rt)
+
+        avg_time = total_time / len(results) if results else 0.0
+        metrics_data = {
+            'graph_uuid': graph_uuid,
+            'created_at': timestamp,
+            'total_queries': len(results),
+            'total_time': total_time,
+            'average_time': avg_time,
+            'per_query': per_query
+        }
+
+        with open(metrics_file, 'w', encoding='utf-8') as mf:
+            json.dump(metrics_data, mf, indent=2)
+
+        logger.info(f"Saved retrieval timing metrics to: {metrics_file}")
+    except Exception as e:
+        logger.warning(f"Failed to save retrieval metrics: {e}")
     return output_file
 
 async def run_export_graph(config_path: str, graph_uuid: str, output_path: str):
@@ -170,6 +207,7 @@ def main():
     retrieval_parser.add_argument('--graph-uuid', required=True, help='UUID of the knowledge graph to query')
     retrieval_parser.add_argument('--query', required=True, help='Query to execute against the graph')
     retrieval_parser.add_argument('--groundtruth', help='Ground truth answer for evaluation (optional)')
+    retrieval_parser.add_argument('--true_chunks', nargs='*', help='Optional list of true chunk indices (e.g. 2 6 40 or 2,6,40)')
 
     # Batch offline retrieval command
     batch_retrieval_parser = subparsers.add_parser('batch-retrieve', help='Run batch offline retrieval from JSON file')
@@ -208,7 +246,25 @@ def main():
         print(f"Knowledge graph construction completed with UUID: {result}")
 
     elif args.command == 'retrieve':
-        result = asyncio.run(run_offline_retrieval(args.config, args.graph_uuid, args.query, args.groundtruth))
+        # Parse true_chunks into a list of ints if provided
+        true_chunks_arg = getattr(args, 'true_chunks', None)
+        true_chunks = None
+        if true_chunks_arg:
+            # Support '2 6 40' or '2,6,40' style inputs
+            parsed = []
+            for part in true_chunks_arg:
+                # Split commas if used
+                if isinstance(part, str) and ',' in part:
+                    parsed.extend([p.strip() for p in part.split(',') if p.strip()])
+                else:
+                    parsed.append(part)
+            try:
+                true_chunks = [int(x) for x in parsed]
+            except Exception:
+                logger.warning("Could not parse --true_chunks; expected space-separated integers or comma-separated list. Ignoring true_chunks argument.")
+                true_chunks = None
+
+        result = asyncio.run(run_offline_retrieval(args.config, args.graph_uuid, args.query, args.groundtruth, true_chunks))
         print(f"Retrieval completed: {result}")
 
     elif args.command == 'batch-retrieve':

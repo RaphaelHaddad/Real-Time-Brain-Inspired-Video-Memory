@@ -1,0 +1,222 @@
+{
+  "statistics": {
+    "total_queries": 30,
+    "correct_answers": 13,
+    "incorrect_answers": 17,
+    "skipped_answers": 0,
+    "accuracy": 0.43333333333333335,
+    "results": []
+  },
+  "results": [
+    {
+      "query": "What color are the gloves worn by the person in the lab?",
+      "groundtruth": "blue",
+      "retrieved_answer": "The gloves worn by the person in the lab are blue.",
+      "context_summary": "Chunks (3):\n  1.  precision, which is essential in scientific research. The video likely aims to document a specific scientific procedure, emphasizing the importance of careful handling and observation in a laboratory setting.\nTime: 07:18-07:23\nContent: The video captures a scene in a laboratory, li...",
+      "is_correct": true
+    },
+    {
+      "query": "What is the title of the document being filled out on the lab bench?",
+      "groundtruth": "AR Glasses Training Chemistry Experiment Report (Simplified Version)",
+      "retrieved_answer": "The title of the document being filled out on the lab bench is not visible in the video.",
+      "context_summary": "Chunks (3):\n  1.  precision, which is essential in scientific research. The video likely aims to document a specific scientific procedure, emphasizing the importance of careful handling and observation in a laboratory setting.\nTime: 07:18-07:23\nContent: The video captures a scene in a laboratory, li...",
+      "is_correct": false
+    },
+    {
+      "query": "What chemical is being weighed in the bottle with the red cap?",
+      "groundtruth": "sodium hydroxide",
+      "retrieved_answer": "The chemical being weighed in the bottle with the red cap is sodium hydroxide (NaOH), as indicated by the experimental purpose and the balanced chemical equation in the report, which describes the reaction between aluminum and sodium hydroxide to produce hydrogen gas.",
+      "context_summary": "Chunks (3):\n  1. , protected by a blue nitrile glove, as they write on a printed document titled \"AR \u773c\u955c\u8bad\u7ec3\u7528\u5316\u5b66\u5b9e\u9a8c\u62a5\u544a (\u7b80\u7248)\" (AR Glasses Training Chemistry Experiment Report - Simplified Version). The person is using a white marker to fill in the \"Experimental Purpose\" section of the report, writing the v...",
+      "is_correct": true
+    },
+    {
+      "query": "What equipment is used to accurately measure the white powder substance?",
+      "groundtruth": "Mettler Toledo analytical balance",
+      "retrieved_answer": "The equipment used to accurately measure the white powder substance is a high-precision analytical balance, specifically a Mettler Toledo ME203E, enclosed within a glass draft shield.",
+      "context_summary": "Chunks (3):\n  1.  precision, which is essential in scientific research. The video likely aims to document a specific scientific procedure, emphasizing the importance of careful handling and observation in a laboratory setting.\nTime: 07:18-07:23\nContent: The video captures a scene in a laboratory, li...",
+      "is_correct": true
+    },
+    {
+      "query": "What is the final weight shown on the digital balance after measuring the substance?",
+      "groundtruth": "80.15 grams",
+      "retrieved_answer": "The final weight shown on the digital balance after measuring the substance is -56.302 g.",
+      "context_summary": "Chunks (3):\n  1.  precision, which is essential in scientific research. The video likely aims to document a specific scientific procedure, emphasizing the importance of careful handling and observation in a laboratory setting.\nTime: 07:18-07:23\nContent: The video captures a scene in a laboratory, li...",
+      "is_correct": false
+    },
+    {
+      "query": "What type of glassware is being used to prepare a solution of precise volume?",
+      "groundtruth": "volumetric flask",
+      "retrieved_answer": "The glassware being used to prepare a solution of precise volume is a glass beaker.",
+      "context_summary": "Chunks (3):\n  1.  **Final Steps:** After adding the desired amount of the substance, the person closes the glass draft shield. The video ends with the person having completed the weighing process.\nIn summary, the video shows a person in a laboratory using a balance to accurately weigh a white powder...",
+      "is_correct": false
+    },
+    {
+      "query": "What is the displayed reading on the balance when the beaker is being tared?",
+      "groundtruth": "-56.301 g",
+      "retrieved_answer": "The displayed reading on the balance when the beaker is being tared is 0.00 g.",
+      "context_summary": "Chunks (3):\n  1.  precision, which is essential in scientific research. The video likely aims to document a specific scientific procedure, emphasizing the importance of careful handling and observation in a laboratory setting.\nTime: 07:18-07:23\nContent: The video captures a scene in a laboratory, li...",
+      "is_correct": false
+    },
+    {
+      "query": "What personal accessory is visible on the person's wrist while handling lab equipment?",
+      "groundtruth": "gold-colored watch with black strap",
+      "retrieved_answer": "The personal accessory visible on the person's wrist while handling lab equipment is a wristwatch.",
+      "context_summary": "Chunks (3):\n  1.  involved in the experiment. The background shows a white cabinet with shelves containing various items, and a fire extinguisher is mounted on the wall, emphasizing the importance of safety in the lab.\n- The third frame provides a closer look at the person's hand as they handle a pi...",
+      "is_correct": true
+    },
+    {
+      "query": "What is the person doing with the volumetric flask after adding the liquid?",
+      "groundtruth": "sealing it with a stopper and shaking it to mix the contents",
+      "retrieved_answer": "After adding the liquid, the person is carefully manipulating the volumetric flask, likely to ensure the solution is properly mixed and the liquid reaches the calibration mark on the flask. This step is crucial for achieving precise concentration in the solution.",
+      "context_summary": "Chunks (3):\n  1.  precision, which is essential in scientific research. The video likely aims to document a specific scientific procedure, emphasizing the importance of careful handling and observation in a laboratory setting.\nTime: 07:18-07:23\nContent: The video captures a scene in a laboratory, li...",
+      "is_correct": false
+    },
+    {
+      "query": "What is the balanced chemical equation for the reaction between aluminum and sodium hydroxide?",
+      "groundtruth": "2Al + 2NaOH + 6H2O \u2192 2Na[Al(OH)4] + 3H2\u2191",
+      "retrieved_answer": "The balanced chemical equation for the reaction between aluminum and sodium hydroxide is:\n\n2Al + 2NaOH + 6H\u2082O \u2192 2Na[Al(OH)\u2084] + 3H\u2082\u2191\n\nThis reaction produces sodium tetrahydroxoaluminate and hydrogen gas.",
+      "context_summary": "Chunks (3):\n  1.  precision, which is essential in scientific research. The video likely aims to document a specific scientific procedure, emphasizing the importance of careful handling and observation in a laboratory setting.\nTime: 07:18-07:23\nContent: The video captures a scene in a laboratory, li...",
+      "is_correct": true
+    },
+    {
+      "query": "Who is observing the experimental procedure in the background wearing a cream-colored sweater?",
+      "groundtruth": "a person with long, dark, curly hair",
+      "retrieved_answer": "The person observing the experimental procedure in the background wearing a cream-colored sweater is a man with long, curly dark hair, who appears to be in a supervisory or teaching role, possibly a professor or senior researcher.",
+      "context_summary": "Chunks (3):\n  1.  precision, which is essential in scientific research. The video likely aims to document a specific scientific procedure, emphasizing the importance of careful handling and observation in a laboratory setting.\nTime: 07:18-07:23\nContent: The video captures a scene in a laboratory, li...",
+      "is_correct": true
+    },
+    {
+      "query": "What material is used to prepare a sample for weighing on the balance?",
+      "groundtruth": "aluminum foil",
+      "retrieved_answer": "Glass.",
+      "context_summary": "Chunks (3):\n  1.  balance. The balance, a Mettler Toledo model, is actively being used to measure the mass of the liquid being transferred. The display on the balance shows a negative reading, such as `-56.302 g`, which is a common feature on analytical balances to tare or zero out the weight of the...",
+      "is_correct": false
+    },
+    {
+      "query": "What safety equipment is visible on the wall in the laboratory?",
+      "groundtruth": "fire extinguisher",
+      "retrieved_answer": "The safety equipment visible on the wall in the laboratory is a fire extinguisher and a red \"Fire Extinguisher\" sign.",
+      "context_summary": "Chunks (3):\n  1.  precision, which is essential in scientific research. The video likely aims to document a specific scientific procedure, emphasizing the importance of careful handling and observation in a laboratory setting.\nTime: 07:18-07:23\nContent: The video captures a scene in a laboratory, li...",
+      "is_correct": true
+    },
+    {
+      "query": "What type of measurement is being performed with the burette and graduated cylinder?",
+      "groundtruth": "titration",
+      "retrieved_answer": "The measurement being performed with the burette and graduated cylinder is volume measurement.",
+      "context_summary": "Chunks (3):\n  1.  precision, which is essential in scientific research. The video likely aims to document a specific scientific procedure, emphasizing the importance of careful handling and observation in a laboratory setting.\nTime: 07:18-07:23\nContent: The video captures a scene in a laboratory, li...",
+      "is_correct": false
+    },
+    {
+      "query": "What is the purpose of the glass enclosure around the analytical balance?",
+      "groundtruth": "to protect the sample from air currents and ensure accurate measurements",
+      "retrieved_answer": "The purpose of the glass enclosure around the analytical balance is to protect the sample from air currents and ensure an accurate measurement.",
+      "context_summary": "Chunks (3):\n  1.  **Final Steps:** After adding the desired amount of the substance, the person closes the glass draft shield. The video ends with the person having completed the weighing process.\nIn summary, the video shows a person in a laboratory using a balance to accurately weigh a white powder...",
+      "is_correct": true
+    },
+    {
+      "query": "What gas is being produced in the chemical reaction shown in the flask on the stirrer?",
+      "groundtruth": "hydrogen gas",
+      "retrieved_answer": "The gas being produced in the chemical reaction shown in the flask on the stirrer is carbon dioxide (CO\u2082).",
+      "context_summary": "Chunks (3):\n  1.  precision, which is essential in scientific research. The video likely aims to document a specific scientific procedure, emphasizing the importance of careful handling and observation in a laboratory setting.\nTime: 07:18-07:23\nContent: The video captures a scene in a laboratory, li...",
+      "is_correct": false
+    },
+    {
+      "query": "What two main chemicals are used to produce hydrogen gas in this experiment?",
+      "groundtruth": "aluminum and sodium hydroxide",
+      "retrieved_answer": "The two main chemicals used to produce hydrogen gas in this experiment are aluminum and hydrochloric acid.",
+      "context_summary": "Chunks (3):\n  1.  is visible inside it. The white tube is now positioned to deliver a substance into this beaker. To the left, a Mettler Toledo analytical balance is visible, indicating that precise measurements are being made. The overall scene suggests a multi-step chemical process.\n- **Frame 4:**...",
+      "is_correct": false
+    },
+    {
+      "query": "What is the purpose of the AR glasses mentioned in the experiment report?",
+      "groundtruth": "to guide or document the chemistry experiment with overlaid instructions and data",
+      "retrieved_answer": "The AR glasses are not mentioned in the provided context.",
+      "context_summary": "Chunks (3):\n  1.  precision, which is essential in scientific research. The video likely aims to document a specific scientific procedure, emphasizing the importance of careful handling and observation in a laboratory setting.\nTime: 07:18-07:23\nContent: The video captures a scene in a laboratory, li...",
+      "is_correct": false
+    },
+    {
+      "query": "What color is the sweater worn by the person with curly hair throughout the video?",
+      "groundtruth": "cream-colored or beige",
+      "retrieved_answer": "The sweater worn by the person with curly hair throughout the video is cream-colored.",
+      "context_summary": "Chunks (3):\n  1.  precision, which is essential in scientific research. The video likely aims to document a specific scientific procedure, emphasizing the importance of careful handling and observation in a laboratory setting.\nTime: 07:18-07:23\nContent: The video captures a scene in a laboratory, li...",
+      "is_correct": true
+    },
+    {
+      "query": "What was the initial amount of aluminum specified in the experiment report for producing hydrogen gas?",
+      "groundtruth": "8g",
+      "retrieved_answer": "The initial amount of aluminum specified in the experiment report for producing hydrogen gas is not provided in the given context.",
+      "context_summary": "Chunks (3):\n  1.  precision, which is essential in scientific research. The video likely aims to document a specific scientific procedure, emphasizing the importance of careful handling and observation in a laboratory setting.\nTime: 07:18-07:23\nContent: The video captures a scene in a laboratory, li...",
+      "is_correct": false
+    },
+    {
+      "query": "What equipment is used to continuously mix the contents of the reaction flask?",
+      "groundtruth": "magnetic stirrer",
+      "retrieved_answer": "The equipment used to continuously mix the contents of the reaction flask is a magnetic stirrer.",
+      "context_summary": "Chunks (3):\n  1.  precision, which is essential in scientific research. The video likely aims to document a specific scientific procedure, emphasizing the importance of careful handling and observation in a laboratory setting.\nTime: 07:18-07:23\nContent: The video captures a scene in a laboratory, li...",
+      "is_correct": true
+    },
+    {
+      "query": "How does the person ensure accurate measurement when weighing the sodium hydroxide?",
+      "groundtruth": "by using a glass enclosure (draft shield) around the balance to prevent air currents from affecting the measurement",
+      "retrieved_answer": "The person ensures accurate measurement by using a high-precision analytical balance enclosed in a glass draft shield to prevent air currents from affecting the measurement.",
+      "context_summary": "Chunks (3):\n  1.  precision, which is essential in scientific research. The video likely aims to document a specific scientific procedure, emphasizing the importance of careful handling and observation in a laboratory setting.\nTime: 07:18-07:23\nContent: The video captures a scene in a laboratory, li...",
+      "is_correct": true
+    },
+    {
+      "query": "What safety symbols are visible on the sodium hydroxide bottle?",
+      "groundtruth": "corrosive hazard symbols indicating it can cause severe skin burns and eye damage",
+      "retrieved_answer": "The video does not show a sodium hydroxide bottle or any safety symbols.",
+      "context_summary": "Chunks (1):\n  1. Time: 15:42-15:47\nContent: The video captures a scene in a well-equipped laboratory, focusing on a scientific experiment in progress. The sequence of frames provides a comprehensive view of the laboratory environment and the experimental setup.\n- **Initial Frame:** The video opens w...",
+      "is_correct": false
+    },
+    {
+      "query": "What technique is used to transfer small amounts of liquid precisely in the experiment?",
+      "groundtruth": "pipetting",
+      "retrieved_answer": "The technique used to transfer small amounts of liquid precisely in the experiment is pipetting, using a translucent tube (pipette).",
+      "context_summary": "Chunks (3):\n  1.  precision, which is essential in scientific research. The video likely aims to document a specific scientific procedure, emphasizing the importance of careful handling and observation in a laboratory setting.\nTime: 07:18-07:23\nContent: The video captures a scene in a laboratory, li...",
+      "is_correct": true
+    },
+    {
+      "query": "What was the purpose of the document being filled out at the beginning of the experiment?",
+      "groundtruth": "to record observations and data for the chemistry experiment involving hydrogen gas production",
+      "retrieved_answer": "The purpose of the document being filled out at the beginning of the experiment was to record precise measurements and observations, ensuring accuracy and maintaining a detailed record of the scientific procedure.",
+      "context_summary": "Chunks (3):\n  1.  precision, which is essential in scientific research. The video likely aims to document a specific scientific procedure, emphasizing the importance of careful handling and observation in a laboratory setting.\nTime: 07:18-07:23\nContent: The video captures a scene in a laboratory, li...",
+      "is_correct": true
+    },
+    {
+      "query": "What was the measured volume of gas produced in the chemical reaction?",
+      "groundtruth": "2mL and 100mL",
+      "retrieved_answer": "The measured volume of gas produced in the chemical reaction was 2mL.",
+      "context_summary": "Chunks (3):\n  1. Time: 00:29-00:34\nContent: The video captures a scene in a laboratory setting where a person is conducting a chemistry experiment. The central focus is on a person's hand, protected by a blue nitrile glove, as they write on a printed document titled \"AR \u773c\u955c\u8bad\u7ec3\u7528\u5316\u5b66\u5b9e\u9a8c\u62a5\u544a (\u7b80\u7248)\" (AR Glasses...",
+      "is_correct": false
+    },
+    {
+      "query": "What type of stirrer is used to mix the cloudy white solution in the later part of the video?",
+      "groundtruth": "magnetic stirrer",
+      "retrieved_answer": "A flexible white tube is used to transfer the cloudy white solution.",
+      "context_summary": "Chunks (3):\n  1.  precision, which is essential in scientific research. The video likely aims to document a specific scientific procedure, emphasizing the importance of careful handling and observation in a laboratory setting.\nTime: 07:18-07:23\nContent: The video captures a scene in a laboratory, li...",
+      "is_correct": false
+    },
+    {
+      "query": "What is the concentration of the sodium hydroxide solution mentioned in the experiment?",
+      "groundtruth": "2mol/L",
+      "retrieved_answer": "The concentration of the sodium hydroxide solution mentioned in the experiment is 0.180 M.",
+      "context_summary": "Chunks (3):\n  1.  **Final Steps:** After adding the desired amount of the substance, the person closes the glass draft shield. The video ends with the person having completed the weighing process.\nIn summary, the video shows a person in a laboratory using a balance to accurately weigh a white powder...",
+      "is_correct": false
+    },
+    {
+      "query": "What type of warning sign is visible on the wall of the laboratory?",
+      "groundtruth": "High Voltage warning sign",
+      "retrieved_answer": "No warning sign is visible on the wall of the laboratory in the provided context.",
+      "context_summary": "Chunks (1):\n  1.  or the product of the reaction.\n- A white, circular device with multiple holes, possibly a multi-well plate or a component of the experimental setup.\n- A black, elongated case with a foam interior, which could be used to store or transport the equipment.\n- A roll of tape, a yellow ...",
+      "is_correct": false
+    },
+    {
+      "query": "What equipment is used to collect gas produced by the reaction in the experiment?",
+      "groundtruth": "a tube connected to a container filled with water (gas collection by water displacement)",
+      "retrieved_answer": "The equipment used to collect gas produced by the reaction in the experiment is not explicitly mentioned in the provided context. The video focuses on the use of a volumetric flask, a pipette, and an analytical balance for measuring and transferring liquids, but there is no description of gas collection equipment. Therefore, based on the given information, it cannot be determined what equipment is used to collect gas.",
+      "context_summary": "Chunks (3):\n  1.  precision, which is essential in scientific research. The video likely aims to document a specific scientific procedure, emphasizing the importance of careful handling and observation in a laboratory setting.\nTime: 07:18-07:23\nContent: The video captures a scene in a laboratory, li...",
+      "is_correct": false
+    }
+  ]
+}

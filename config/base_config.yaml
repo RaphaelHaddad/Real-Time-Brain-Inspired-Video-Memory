@@ -20,7 +20,7 @@ llm_injector:
   temperature: 0.05
   top_p: 0.9
   max_tokens: 8192
-  subgraph_extraction_injection: true
+  subgraph_extraction_injection: false
 
 chunking:
   enabled: true
@@ -69,13 +69,13 @@ retrieval:
   reranker_api_key: ""
   reranker_model: "qwen-reranker"
   top_k: 5
-  top_k_chunks: 8
+  top_k_chunks: 3
   top_k_entities: 5
   top_k_relationships: 5
-  graph_hops: 5
+  graph_hops: 2
   post_compression: true
   compression_threshold: 0.15
-  verbose: true
+  verbose: false
   entity_first: true
   rerank_after_traversal: true
   rerank_entities: true
