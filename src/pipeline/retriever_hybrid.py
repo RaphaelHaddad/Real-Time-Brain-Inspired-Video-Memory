@@ -124,47 +124,63 @@ class HybridRetriever:
     async def _perform_hybrid_retrieval(self, query: str) -> str:
         """
         Perform hybrid retrieval:
-        1. Vector search on chunks (top_k_chunks)
+        1. Vector search on chunks (top_k_chunks) or skip if entity_first
         2. Fulltext search on entities (top_k_entities)
         3. Graph traversal from entities (graph_hops)
-        4. Reranking and post-compression
+        4. Post-compression (if enabled and not entity_first)
+        5. Reranking (after traversal if rerank_after_traversal, else after vector)
         """
         try:
             logger.debug(f"Starting hybrid retrieval for query: '{query}'")
             retrieval_start = time.perf_counter()
             
             async with self.neo4j_handler.driver.session() as session:
-                # Step 1: Parallel vector + fulltext search
+                # Step 1: Parallel vector + fulltext search (skip vector if entity_first)
                 chunk_search_start = time.perf_counter()
-                chunk_results, entity_results = await asyncio.gather(
-                    self._vector_search_chunks(session, query),
-                    self._fulltext_search_entities(session, query)
-                )
+                if self.config.entity_first:
+                    chunk_results = []
+                    entity_results = await self._fulltext_search_entities(session, query)
+                else:
+                    chunk_results, entity_results = await asyncio.gather(
+                        self._vector_search_chunks(session, query),
+                        self._fulltext_search_entities(session, query)
+                    )
                 search_time = time.perf_counter() - chunk_search_start
                 logger.debug(f"Search complete: {len(chunk_results)} chunks, {len(entity_results)} entities in {search_time:.3f}s")
                 
                 # Step 2: Graph traversal from top entities
                 graph_start = time.perf_counter()
-                expanded_entities = await self._expand_entity_graph(session, entity_results)
+                expanded_entities, traversal_chunks, traversal_relationships = await self._expand_entity_graph_with_chunks(session, entity_results)
                 graph_time = time.perf_counter() - graph_start
-                logger.debug(f"Graph expansion: {len(expanded_entities)} entities after {self.config.graph_hops} hops in {graph_time:.3f}s")
+                logger.debug(f"Graph expansion: {len(expanded_entities)} entities, {len(traversal_chunks)} chunks, {len(traversal_relationships)} relationships after {self.config.graph_hops} hops in {graph_time:.3f}s")
                 
-                # Step 3: Post-compression (if enabled)
-                if self.config.post_compression and chunk_results:
+                # Step 3: Post-compression (if enabled and not entity_first)
+                if self.config.post_compression and chunk_results and not self.config.entity_first:
                     compress_start = time.perf_counter()
                     chunk_results = await self._post_compress_chunks(query, chunk_results)
                     compress_time = time.perf_counter() - compress_start
                     logger.debug(f"Post-compression: {len(chunk_results)} chunks retained in {compress_time:.3f}s")
                 
-                # Step 4: Reranking (if enabled)
-                if self.config.use_reranker and (chunk_results or entity_results):
+                # Step 4: Reranking
+                if self.config.rerank_after_traversal:
+                    rerank_start = time.perf_counter()
+                    # Rerank traversal results
+                    if self.config.rerank_entities and expanded_entities:
+                        expanded_entities = await self._rerank_entities(query, expanded_entities)
+                    if self.config.rerank_relationships and traversal_relationships:
+                        traversal_relationships = await self._rerank_relationships(query, traversal_relationships)
+                    if traversal_chunks:
+                        traversal_chunks = await self._rerank_chunks(query, traversal_chunks)
+                    rerank_time = time.perf_counter() - rerank_start
+                    logger.debug(f"Post-traversal reranking: entities={len(expanded_entities)}, relationships={len(traversal_relationships)}, chunks={len(traversal_chunks)} in {rerank_time:.3f}s")
+                elif self.config.use_reranker and chunk_results:
                     rerank_start = time.perf_counter()
                     chunk_results = await self._rerank_chunks(query, chunk_results)
                     rerank_time = time.perf_counter() - rerank_start
-                    logger.debug(f"Reranking: complete in {rerank_time:.3f}s")
+                    logger.debug(f"Vector reranking: complete in {rerank_time:.3f}s")
                 
                 # Format final results
-                result_text = self._format_retrieval_results(query, chunk_results, expanded_entities)
+                result_text = self._format_retrieval_results(query, chunk_results + traversal_chunks, expanded_entities, traversal_relationships)
                 
                 total_time = time.perf_counter() - retrieval_start
                 logger.debug(f"Total retrieval time: {total_time:.3f}s")
@@ -285,6 +301,75 @@ class HybridRetriever:
             logger.warning(f"Graph expansion failed: {e}")
             return []
 
+    async def _expand_entity_graph_with_chunks(self, session, entities: List[Dict], hops: int = None) -> tuple[List[Dict], List[Dict], List[Dict]]:
+        """Expand entity graph via relationship traversal, collecting entities, chunks, and relationships"""
+        if not entities or not hops:
+            hops = self.config.graph_hops
+        
+        try:
+            logger.debug(f"Expanding entity graph with {hops} hops")
+            expanded_entities = set()
+            traversal_chunks = set()
+            traversal_relationships = set()
+            
+            for entity in entities:
+                # Traverse relationships from this entity, collecting entities, chunks, and relationships
+                result = await session.run(
+                    f"""
+                    MATCH (e:Entity {{name: $entity_name, graph_uuid: $graph_uuid}})
+                    MATCH path = (e)-[*1..{hops}]-(related)
+                    WHERE related.graph_uuid = $graph_uuid
+                    UNWIND relationships(path) AS rel
+                    RETURN DISTINCT 
+                        related.name AS related_name, 
+                        related.batch_time AS related_batch_time,
+                        labels(related) AS related_labels,
+                        rel.type AS rel_type,
+                        startNode(rel).name AS start_name,
+                        endNode(rel).name AS end_name,
+                        rel.properties AS rel_props
+                    """,
+                    entity_name=entity["name"],
+                    graph_uuid=self.neo4j_handler.run_uuid
+                )
+                
+                async for record in result:
+                    related_labels = record["related_labels"]
+                    if "Entity" in related_labels:
+                        expanded_entities.add((record["related_name"], record["related_batch_time"] or ""))
+                    elif "Chunk" in related_labels:
+                        # Get chunk details
+                        chunk_result = await session.run(
+                            """
+                            MATCH (c:Chunk {id: $chunk_id, graph_uuid: $graph_uuid})
+                            RETURN c.content AS content, c.time AS time
+                            """,
+                            chunk_id=record["related_name"],  # Assuming id is stored as name
+                            graph_uuid=self.neo4j_handler.run_uuid
+                        )
+                        async for chunk_record in chunk_result:
+                            traversal_chunks.add((
+                                record["related_name"],
+                                chunk_record["content"],
+                                chunk_record["time"]
+                            ))
+                    
+                    # Collect relationships
+                    rel_desc = f"{record['start_name']} -[{record['rel_type']}]-> {record['end_name']}"
+                    traversal_relationships.add(rel_desc)
+            
+            # Convert to lists
+            expanded_list = [{"name": n, "batch_time": t, "source": "graph_traversal"} for n, t in expanded_entities]
+            chunks_list = [{"id": cid, "content": content, "time": time, "source": "graph_traversal"} for cid, content, time in traversal_chunks]
+            relationships_list = [{"description": desc, "source": "graph_traversal"} for desc in traversal_relationships]
+            
+            logger.debug(f"Graph expansion found {len(expanded_list)} entities, {len(chunks_list)} chunks, {len(relationships_list)} relationships")
+            return expanded_list, chunks_list, relationships_list
+        
+        except Exception as e:
+            logger.warning(f"Graph expansion failed: {e}")
+            return [], [], []
+
     async def _post_compress_chunks(self, query: str, chunks: List[Dict]) -> List[Dict]:
         """Post-compression: split chunks and filter by similarity"""
         if not self.embedder or not chunks:
@@ -375,6 +460,84 @@ class HybridRetriever:
             logger.warning(f"Reranking failed: {e}")
             return chunks
 
+    async def _rerank_entities(self, query: str, entities: List[Dict]) -> List[Dict]:
+        """Rerank entities using external reranker"""
+        if not self.config.use_reranker or not entities:
+            return entities
+        
+        try:
+            logger.debug(f"Reranking {len(entities)} entities")
+            
+            documents = [e["name"] for e in entities]
+            payload = {
+                "query": query,
+                "documents": documents,
+                "top_k": len(documents)
+            }
+            
+            headers = {"Content-Type": "application/json"}
+            if self.config.reranker_api_key:
+                headers["Authorization"] = f"Bearer {self.config.reranker_api_key}"
+            
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    self.config.reranker_endpoint,
+                    json=payload,
+                    headers=headers
+                )
+                response.raise_for_status()
+                rerank_result = response.json()
+            
+            # Reorder entities based on reranker
+            if "results" in rerank_result and isinstance(rerank_result["results"], list):
+                reranked_indices = [item["index"] for item in rerank_result["results"]]
+                return [entities[i] for i in reranked_indices if i < len(entities)]
+            
+            return entities
+        
+        except Exception as e:
+            logger.warning(f"Entity reranking failed: {e}")
+            return entities
+
+    async def _rerank_relationships(self, query: str, relationships: List[Dict]) -> List[Dict]:
+        """Rerank relationships using external reranker"""
+        if not self.config.use_reranker or not relationships:
+            return relationships
+        
+        try:
+            logger.debug(f"Reranking {len(relationships)} relationships")
+            
+            documents = [r["description"] for r in relationships]
+            payload = {
+                "query": query,
+                "documents": documents,
+                "top_k": len(documents)
+            }
+            
+            headers = {"Content-Type": "application/json"}
+            if self.config.reranker_api_key:
+                headers["Authorization"] = f"Bearer {self.config.reranker_api_key}"
+            
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    self.config.reranker_endpoint,
+                    json=payload,
+                    headers=headers
+                )
+                response.raise_for_status()
+                rerank_result = response.json()
+            
+            # Reorder relationships based on reranker
+            if "results" in rerank_result and isinstance(rerank_result["results"], list):
+                reranked_indices = [item["index"] for item in rerank_result["results"]]
+                return [relationships[i] for i in reranked_indices if i < len(relationships)]
+            
+            return relationships
+        
+        except Exception as e:
+            logger.warning(f"Relationship reranking failed: {e}")
+            return relationships
+
     @staticmethod
     def _cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
         """Compute cosine similarity between two vectors"""
@@ -386,7 +549,7 @@ class HybridRetriever:
             return 0.0
         return dot_product / (mag1 * mag2)
 
-    def _format_retrieval_results(self, query: str, chunks: List[Dict], entities: List[Dict]) -> str:
+    def _format_retrieval_results(self, query: str, chunks: List[Dict], entities: List[Dict], relationships: List[Dict] = None) -> str:
         """Format retrieval results for output"""
         parts = []
         
@@ -400,9 +563,14 @@ class HybridRetriever:
         
         if entities:
             parts.append(f"\nRelated Entities ({len(entities)}):")
-            for i, ent in enumerate(entities[:5], 1):
+            for i, ent in enumerate(entities[:self.config.top_k_entities], 1):
                 score_info = f" (score: {ent.get('score', 0):.3f})" if 'score' in ent else ""
                 parts.append(f"  {i}. {ent['name']}{score_info}")
+        
+        if relationships:
+            parts.append(f"\nRelated Relationships ({len(relationships)}):")
+            for i, rel in enumerate(relationships[:self.config.top_k_relationships], 1):
+                parts.append(f"  {i}. {rel['description']}")
         
         if not parts:
             return f"No results found for query '{query}'"

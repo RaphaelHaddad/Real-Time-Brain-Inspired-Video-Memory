@@ -31,12 +31,12 @@ chunking:
   parallel_count: 2
   enable_global_refinement: true
   refinement_max_tokens: 2000
-  global_triplet_limit: 25
+  global_triplet_limit: 15  # Reduced from 25 to reduce token usage
   # Limits for instruction-based global refinement outputs
-  max_new_triplets: 20
-  max_inter_chunk_relations: 10
-  max_merge_instructions: 8
-  max_prune_instructions: 8
+  max_new_triplets: 10  # Reduced from 20
+  max_inter_chunk_relations: 5  # Reduced from 10
+  max_merge_instructions: 4  # Reduced from 8
+  max_prune_instructions: 4  # Reduced from 8
   # Per-chunk LLM timeout/retry
   chunk_timeout_seconds: 5.0
   chunk_timeout_retries: 3
@@ -44,7 +44,7 @@ chunking:
 
 kg:
   batch_size: 3
-  verbose: false
+  verbose: true
   embedding_endpoint: "http://localhost:8071/v1"
   embedding_model: "qwen-embedding"
   embedding_api_key: ""
@@ -70,10 +70,15 @@ retrieval:
   top_k: 5
   top_k_chunks: 8
   top_k_entities: 5
-  graph_hops: 2
+  top_k_relationships: 5
+  graph_hops: 5
   post_compression: true
   compression_threshold: 0.15
-  verbose: false
+  verbose: true
+  entity_first: true
+  rerank_after_traversal: true
+  rerank_entities: true
+  rerank_relationships: true
 
 benchmark_llm:
   endpoint: "http://localhost:8078/v1"

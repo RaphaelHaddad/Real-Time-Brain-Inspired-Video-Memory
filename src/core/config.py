@@ -75,10 +75,15 @@ class RetrievalConfig(BaseModel):
     top_k: int = 5
     top_k_chunks: int = 8  # Initial vector search on chunks
     top_k_entities: int = 5  # Parallel search on entities
+    top_k_relationships: int = 5  # Limit for displayed relationships
     graph_hops: int = 2
     post_compression: bool = True  # Enable contextual compression
     compression_threshold: float = 0.7  # Minimum similarity for retained chunks
     verbose: bool = False
+    entity_first: bool = False  # Skip vector search, rely on entities + traversal
+    rerank_after_traversal: bool = False  # Rerank after traversal instead of after vector search
+    rerank_entities: bool = False  # Rerank entities separately
+    rerank_relationships: bool = False  # Rerank relationships separately
 
 class BenchmarkLLMConfig(BaseModel):
     """Configuration for benchmark evaluation using LLM"""
