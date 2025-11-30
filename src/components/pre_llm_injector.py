@@ -5,6 +5,7 @@ Uses TokenTextSplitter + LLMGraphTransformer for efficient local extraction
 
 import asyncio
 import json
+import random
 from typing import List, Dict, Any
 from langchain_core.prompts import ChatPromptTemplate
 from .prompts import build_pre_llm_prompt_template
@@ -258,7 +259,7 @@ class PreLLMInjector:
                     async with sem:
                         subg = await self._extract_subgraph_for_chunk_id(chunk_id, neo4j_handler)
                         if subg:
-                            logger.debug(f"Subgraph for {chunk_id}: {subg}")
+                            logger.debug(f"{subg}")
                             subgraphs[chunk_id] = subg
 
                 extract_tasks = [extract_and_log(cid) for cid, _ in top_similar_chunks]
@@ -449,6 +450,10 @@ class PreLLMInjector:
                     return ""
                 logger.debug(f"Found {len(entity_names)} entities linked to chunk_id={chunk_id}")
 
+                # Get max_connection_subgraph parameter from config
+                max_connections = getattr(self.config, 'max_connection_subgraph', 2)
+                logger.debug(f"Using max_connection_subgraph limit: {max_connections}")
+
                 # Fetch relationships where at least one endpoint is in our entity set
                 rel_query = """
                 MATCH (e1:Entity:GraphNode)-[r]->(e2:Entity:GraphNode)
@@ -462,8 +467,7 @@ class PreLLMInjector:
                     rel_query, graph_uuid=neo4j_handler.run_uuid, entity_names=entity_names
                 )
 
-                relations = []
-                # entities_info = {} # Unused
+                all_relations = []
                 async for rec in res:
                     head = rec["head"]
                     tail = rec["tail"]
@@ -471,10 +475,13 @@ class PreLLMInjector:
                     head_chunks = rec["head_chunks"] if rec["head_chunks"] is not None else []
                     tail_chunks = rec["tail_chunks"] if rec["tail_chunks"] is not None else []
 
-                    relations.append((head, rel, tail, head_chunks, tail_chunks))
+                    all_relations.append((head, rel, tail, head_chunks, tail_chunks))
+
+                # Apply connection limit per seed entity
+                relations = self._limit_subgraph_connections(all_relations, entity_names, max_connections)
 
                 if not relations:
-                    logger.debug(f"No relationships found for entities linked to chunk_id={chunk_id}")
+                    logger.debug(f"No relationships found for entities linked to chunk_id={chunk_id} after connection limiting")
 
                 # Build a compact string representation
                 # Entities list removed as per request
@@ -631,3 +638,62 @@ class PreLLMInjector:
                 )
 
         return deduped
+
+    def _limit_subgraph_connections(self, all_relations: List[tuple], seed_entities: List[str], max_connections: int) -> List[tuple]:
+        """Limit the number of outside connections per seed entity to prevent subgraph explosion.
+
+        Args:
+            all_relations: List of (head, rel, tail, head_chunks, tail_chunks) tuples
+            seed_entities: List of entity names that are seeds (directly linked to chunk)
+            max_connections: Maximum number of outside connections per seed entity
+
+        Returns:
+            Filtered list of relationships with connection limits applied
+        """
+        import random
+
+        # Separate relationships into internal (between seed entities) and external (to outside entities)
+        internal_relations = []
+        external_relations_by_seed = {}  # seed_entity -> list of external relations
+
+        seed_set = set(seed_entities)
+
+        for relation in all_relations:
+            head, rel, tail, head_chunks, tail_chunks = relation
+
+            # Check if this is an internal relationship (both entities are seeds)
+            if head in seed_set and tail in seed_set:
+                internal_relations.append(relation)
+            else:
+                # External relationship - find which seed entity is involved
+                if head in seed_set:
+                    seed_entity = head
+                elif tail in seed_set:
+                    seed_entity = tail
+                else:
+                    # This shouldn't happen given our query, but skip if neither is a seed
+                    continue
+
+                if seed_entity not in external_relations_by_seed:
+                    external_relations_by_seed[seed_entity] = []
+                external_relations_by_seed[seed_entity].append(relation)
+
+        # Apply connection limit per seed entity
+        selected_external_relations = []
+        for seed_entity, relations in external_relations_by_seed.items():
+            if len(relations) <= max_connections:
+                # Take all if under limit
+                selected_external_relations.extend(relations)
+            else:
+                # Randomly select max_connections
+                selected = random.sample(relations, max_connections)
+                selected_external_relations.extend(selected)
+                logger.debug(f"Limited {seed_entity} from {len(relations)} to {max_connections} external connections")
+
+        # Combine internal and selected external relations
+        final_relations = internal_relations + selected_external_relations
+
+        logger.debug(f"Subgraph connection limiting: {len(all_relations)} total -> {len(final_relations)} "
+                    f"(internal: {len(internal_relations)}, external: {len(selected_external_relations)})")
+
+        return final_relations

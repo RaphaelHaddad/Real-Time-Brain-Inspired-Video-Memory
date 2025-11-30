@@ -68,7 +68,7 @@ JSON OUTPUT:
 LLM_INJECTOR_INSTRUCTION_PROMPT_TEMPLATE = """
 Perform advanced knowledge graph refinement by strictly executing the required operations.
 
-RULE: If CONTEXT SUBGRAPHS is empty or says "No subgraph context available", set "inter_chunk_relations", "merge_instructions", and "prune_instructions" to []. ONLY add to "new_triplets" from NEW CANDIDATES. DO NOT invent IDs, entities, or relations—stick to provided data. For merges/links, match EXACT entity names/IDs from CONTEXT only.
+{empty_context_rule}
 
 ### CONTEXT SUBGRAPHS (Relevant Existing Knowledge):
 {subgraph_context}
@@ -79,16 +79,11 @@ RULE: If CONTEXT SUBGRAPHS is empty or says "No subgraph context available", set
 ### STRICT OUTPUT FORMAT:
 Return ONLY a single JSON object with these 4 keys. No extra text.
 
-LIMITS:
-- Limit "new_triplets" to at most {max_new_triplets} items: Prioritize actions/interactions; drop dups/redundants (e.g., multiple "Contains | Equation").
-- Limit "inter_chunk_relations" to at most {max_inter_chunk_relations} items: ONLY links where Tail is an EXACT match to CONTEXT entity name/ID (e.g., new "Lab Bench" → existing "Laboratory Table" ID 0_0). Ignore if no match—do NOT duplicate new_triplets.
-- Limit "merge_instructions" to at most {max_merge_instructions} items: ONLY semantic duplicates (e.g., "Nitrile Glove" → "Blue Glove" ID 0_3); verify ID exactness from CONTEXT.
-- Limit "prune_instructions" to at most {max_prune_instructions} items: ONLY clear conflicts/refutations.
-
-1. "new_triplets": List of new facts NOT in CONTEXT. Format: [[Head, Relation, Tail, [SourceIndices]], ...]
-2. "inter_chunk_relations": New links NEW → CONTEXT. Format: [[NewHead, Relation, ExistingTail, [SourceIndices]], ...] (ExistingTail: name from CONTEXT, no ID here).
-3. "merge_instructions": Merge local dups to existing. Format: [{{"local": LocalName, "existing": ExistingName, "existing_id": ExistingID}}, ...]
-4. "prune_instructions": Remove entities or relationships from CONTEXT. Format: Either {{"entity": EntityName}} to delete an entity and all its relationships, or {{"head": HeadName, "relation": RelationName, "tail": TailName}} to delete a specific relationship.
+OUTPUT SPECIFICATIONS:
+1. "new_triplets" (max {max_new_triplets}): New facts NOT in CONTEXT. Format: [[Head, Relation, Tail, [SourceIndices]], ...] - Prioritize actions/interactions; drop duplicates/redundants.
+2. "inter_chunk_relations" (max {max_inter_chunk_relations}): Links NEW → CONTEXT entities. Format: [[NewHead, Relation, ExistingTail, [SourceIndices]], ...] - ExistingTail must EXACTLY match CONTEXT entity name/ID.
+3. "merge_instructions" (max {max_merge_instructions}): Merge semantic duplicates. Format: [{{"local": LocalName, "existing": ExistingName, "existing_id": ExistingID}}, ...] - Verify ID exactness from CONTEXT.
+4. "prune_instructions" (max {max_prune_instructions}): Remove conflicts/refutations. Format: Either {{"entity": EntityName}} or {{"head": HeadName, "relation": RelationName, "tail": TailName}}.
 
 ### EXAMPLES:
 Merge: "merge_instructions": [{{"local": "Nitrile Glove", "existing": "Blue Glove", "existing_id": "0_3"}}]

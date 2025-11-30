@@ -271,11 +271,17 @@ class GlobalRefiner:
             subgraph_context = ""
             context_is_empty = False
             if subgraphs:
-                subgraph_list = [f"{cid}: {subg}" for cid, subg in subgraphs.items()]
+                subgraph_list = [f"Subgraph_{i+1}: {subg}" for i, (cid, subg) in enumerate(subgraphs.items())]
                 subgraph_context = "\n".join(subgraph_list[:5])  # Limit to top 5 subgraphs
             else:
                 subgraph_context = "No subgraph context available"
                 context_is_empty = True
+
+            # Set the empty context rule conditionally
+            if context_is_empty:
+                empty_context_rule = "RULE: If CONTEXT SUBGRAPHS is empty or says \"No subgraph context available\", set \"inter_chunk_relations\", \"merge_instructions\", and \"prune_instructions\" to []. ONLY add to \"new_triplets\" from NEW CANDIDATES. DO NOT invent IDs, entities, or relations—stick to provided data. For merges/links, match EXACT entity names/IDs from CONTEXT only."
+            else:
+                empty_context_rule = ""
 
             # Pre-LLM validation: inject flag for empty context to prevent hallucinations
             if context_is_empty:
@@ -300,6 +306,7 @@ class GlobalRefiner:
             triplets_json = json.dumps(processed_triplets, indent=None)
 
             prompt = self.instruction_prompt_template.format(
+                empty_context_rule=empty_context_rule,
                 subgraph_context=subgraph_context,
                 pre_extracted_triplets=triplets_json,
                 max_new_triplets=getattr(self.chunking_config, 'max_new_triplets', 15),

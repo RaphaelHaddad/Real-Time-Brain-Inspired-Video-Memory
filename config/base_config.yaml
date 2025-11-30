@@ -30,7 +30,7 @@ chunking:
   use_sentence_boundaries: true
   parallel_count: 2
   enable_global_refinement: true
-  refinement_max_tokens: 2000
+  refinement_max_tokens: 4000
   global_triplet_limit: 15  # Reduced from 25 to reduce token usage
   # Limits for instruction-based global refinement outputs
   max_new_triplets: 10  # Reduced from 20
@@ -41,6 +41,7 @@ chunking:
   chunk_timeout_seconds: 5.0
   chunk_timeout_retries: 3
   batch_llm_parallelism: false
+  max_connection_subgraph: 2
 
 kg:
   batch_size: 3
