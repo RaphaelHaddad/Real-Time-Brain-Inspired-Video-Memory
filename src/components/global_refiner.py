@@ -56,7 +56,9 @@ class GlobalRefiner:
         self.chain = self.llm.with_structured_output(CompactTripletOutput)
         self.prompt_template = get_llm_injector_prompt_template()
 
+        # Create both structured and raw chains for fallback
         self.instruction_chain = self.llm.with_structured_output(InstructionRefinementOutput)
+        self.instruction_chain_raw = self.llm  # Raw chain for direct text output
         self.instruction_prompt_template = get_llm_injector_instruction_prompt_template()
 
         logger.info(
@@ -323,22 +325,28 @@ class GlobalRefiner:
                 f"(prompt ~{prompt_words} words, ~{prompt_words * 1.3:.0f} tokens)"
             )
 
-            # Call structured LLM
-            logger.debug("Starting instruction-based refinement LLM call...")
+            # Call raw LLM directly (more reliable than structured output)
+            logger.debug("Starting raw LLM call for instruction-based refinement...")
             llm_start = time.perf_counter()
-            output = await self.instruction_chain.ainvoke([("user", prompt)])
+            
+            from langchain_core.messages import HumanMessage
+            raw_output = await self.instruction_chain_raw.ainvoke([HumanMessage(content=prompt)])
+            
             llm_time = time.perf_counter() - llm_start
-            logger.debug(f"LLM call completed in {llm_time:.2f}s")
+            logger.debug(f"Raw LLM call completed in {llm_time:.2f}s")
+            
+            # Extract text content from response
+            if hasattr(raw_output, 'content'):
+                raw_text = raw_output.content
+            else:
+                raw_text = str(raw_output)
+            
+            logger.debug(f"Raw LLM response ({len(raw_text)} chars): {raw_text[:500]}...")
 
-            logger.debug(f"Instruction-based refinement raw LLM output: {output}")
-
-            # Fast parsing of structured output (most common and fastest path)
-            def _fast_parse_instruction_output(obj) -> Dict[str, Any]:
-                """Quickly extract the four instruction lists from the LLM result.
-
-                This first tries to access attributes (structured output). If that fails,
-                it quickly tries a JSON parse of the string representation as fallback.
-                """
+            # Parse JSON from raw text
+            def _parse_json_from_text(text: str) -> Dict[str, Any]:
+                """Parse JSON from raw LLM text response."""
+                import re
                 parsed = {
                     "new_triplets": [],
                     "inter_chunk_relations": [],
@@ -346,31 +354,31 @@ class GlobalRefiner:
                     "prune_instructions": [],
                 }
                 try:
-                    # If the chain returns a structured result / pydantic model
-                    parsed["new_triplets"] = getattr(obj, "new_triplets", []) or []
-                    parsed["inter_chunk_relations"] = getattr(obj, "inter_chunk_relations", []) or []
-                    parsed["merge_instructions"] = getattr(obj, "merge_instructions", []) or []
-                    parsed["prune_instructions"] = getattr(obj, "prune_instructions", []) or []
-                    return parsed
-                except Exception:
-                    # Fast fallback: try JSON parse of str(obj)
+                    # Try to find JSON object in the text
+                    # First try direct parse
                     try:
-                        raw_text = str(obj)
-                        import re
-                        m = re.search(r"\{[\s\S]*\}", raw_text)
-                        if m:
-                            raw_json = json.loads(m.group(0))
+                        raw_json = json.loads(text.strip())
+                    except json.JSONDecodeError:
+                        # Try to extract JSON from markdown code blocks or surrounding text
+                        json_match = re.search(r'\{[\s\S]*\}', text)
+                        if json_match:
+                            raw_json = json.loads(json_match.group(0))
                         else:
-                            raw_json = json.loads(raw_text)
-                        parsed["new_triplets"] = raw_json.get("new_triplets", [])
-                        parsed["inter_chunk_relations"] = raw_json.get("inter_chunk_relations", [])
-                        parsed["merge_instructions"] = raw_json.get("merge_instructions", [])
-                        parsed["prune_instructions"] = raw_json.get("prune_instructions", [])
-                        return parsed
-                    except Exception:
-                        return parsed
-
-            parsed_op = _fast_parse_instruction_output(output)
+                            logger.warning(f"No JSON found in LLM response")
+                            return parsed
+                    
+                    parsed["new_triplets"] = raw_json.get("new_triplets", [])
+                    parsed["inter_chunk_relations"] = raw_json.get("inter_chunk_relations", [])
+                    parsed["merge_instructions"] = raw_json.get("merge_instructions", [])
+                    parsed["prune_instructions"] = raw_json.get("prune_instructions", [])
+                    logger.debug(f"Successfully parsed JSON: {len(parsed['new_triplets'])} new_triplets, {len(parsed['inter_chunk_relations'])} inter_chunk, {len(parsed['merge_instructions'])} merges, {len(parsed['prune_instructions'])} prunes")
+                    return parsed
+                except Exception as e:
+                    logger.warning(f"JSON parsing failed: {e}")
+                    logger.debug(f"Failed to parse text: {text[:500]}")
+                    return parsed
+            
+            parsed_op = _parse_json_from_text(raw_text)
 
             # Post-LLM sanitization: if context was empty but LLM hallucinated operations, force empty
             if context_is_empty:

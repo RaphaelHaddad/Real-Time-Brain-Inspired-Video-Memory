@@ -80,10 +80,10 @@ Perform advanced knowledge graph refinement by strictly executing the required o
 Return ONLY a single JSON object with these 4 keys. No extra text.
 
 OUTPUT SPECIFICATIONS:
-1. "new_triplets" (max {max_new_triplets}): New facts NOT in CONTEXT. Format: [[Head, Relation, Tail, [SourceIndices]], ...] - Prioritize actions/interactions; drop duplicates/redundants.
-2. "inter_chunk_relations" (max {max_inter_chunk_relations}): Links NEW → CONTEXT entities. Format: [[NewHead, Relation, ExistingTail, [SourceIndices]], ...] - ExistingTail must EXACTLY match CONTEXT entity name/ID.
-3. "merge_instructions" (max {max_merge_instructions}): Merge semantic duplicates. Format: [{{"local": LocalName, "existing": ExistingName, "existing_id": ExistingID}}, ...] - Verify ID exactness from CONTEXT.
-4. "prune_instructions" (max {max_prune_instructions}): Remove conflicts/refutations. Format: Either {{"entity": EntityName}} or {{"head": HeadName, "relation": RelationName, "tail": TailName}}.
+1. "new_triplets" (MAXIMUM {max_new_triplets} items): New facts NOT in CONTEXT. Format: [[Head, Relation, Tail, [SourceIndices]], ...] - Prioritize actions/interactions; drop duplicates/redundants.
+2. "inter_chunk_relations" (MAXIMUM {max_inter_chunk_relations} items): Links NEW → CONTEXT entities. Format: [[NewHead, Relation, ExistingTail, [SourceIndices]], ...] - ExistingTail must EXACTLY match CONTEXT entity name/ID.
+3. "merge_instructions" (MAXIMUM {max_merge_instructions} items): Merge semantic duplicates. Format: [{{"local": LocalName, "existing": ExistingName, "existing_id": ExistingID}}, ...] - Verify ID exactness from CONTEXT.
+4. "prune_instructions" (MAXIMUM {max_prune_instructions} items): Remove conflicts/refutations. Format: Either {{"entity": EntityName}} or {{"head": HeadName, "relation": RelationName, "tail": TailName}}.
 
 ### EXAMPLES:
 Merge: "merge_instructions": [{{"local": "Nitrile Glove", "existing": "Blue Glove", "existing_id": "0_3"}}]
