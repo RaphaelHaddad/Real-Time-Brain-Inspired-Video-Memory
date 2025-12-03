@@ -88,6 +88,30 @@ METRIC_NAMES = {
     'kg_build_time': 'KG Build Time (s)',
 }
 
+# Network science metrics of interest (final graph state)
+NETWORK_METRICS = {
+    'node_count': 'Node Count',
+    'relationship_count': 'Edge Count',
+    'density': 'Graph Density',
+    'avg_degree': 'Avg Degree',
+    'global_efficiency': 'Global Efficiency',
+    'avg_path_length': 'Avg Path Length',
+    'clustering_coefficient': 'Clustering Coeff.',
+    'louvain_modularity': 'Modularity',
+    'louvain_communities': 'Communities',
+    'degree_assortativity': 'Assortativity',
+    'graph_robustness': 'Robustness',
+    'pagerank_top10_percent': 'PageRank Top10%',
+    'label_entropy': 'Label Entropy',
+}
+
+# Key network metrics for correlation analysis
+KEY_NETWORK_METRICS = [
+    'node_count', 'relationship_count', 'density', 'global_efficiency',
+    'clustering_coefficient', 'louvain_modularity', 'avg_path_length',
+    'degree_assortativity', 'graph_robustness'
+]
+
 
 def load_sweep_data(filepath: str) -> pd.DataFrame:
     """Load sweep summary JSON and convert to DataFrame."""
@@ -107,11 +131,72 @@ def load_sweep_data(filepath: str) -> pd.DataFrame:
             'accuracy': r['accuracy'],
             'avg_retrieval_time': r['avg_retrieval_time'],
             'kg_build_time': r['kg_build_time'],
+            'output_folder': r.get('output_folder', ''),
         }
         row.update(r['parameters'])
         rows.append(row)
     
     df = pd.DataFrame(rows)
+    return df
+
+
+def load_network_metrics(df: pd.DataFrame, sweep_dir: Path) -> pd.DataFrame:
+    """Load final-batch network metrics from each epoch's kg_metrics JSON file."""
+    import glob
+    
+    network_data = []
+    
+    for _, row in df.iterrows():
+        epoch = row['epoch']
+        graph_uuid = row['graph_uuid']
+        output_folder = row.get('output_folder', '')
+        
+        # Try to find the kg_metrics file
+        kg_metrics_file = None
+        
+        if output_folder and Path(output_folder).exists():
+            # Look for kg_metrics file in output folder
+            pattern = Path(output_folder) / f'kg_metrics_*.json'
+            matches = list(Path(output_folder).glob('kg_metrics_*.json'))
+            if matches:
+                kg_metrics_file = matches[0]
+        
+        if kg_metrics_file is None:
+            # Try epoch folder pattern
+            epoch_folder = sweep_dir / f'epoch_{epoch:03d}'
+            if epoch_folder.exists():
+                matches = list(epoch_folder.glob('kg_metrics_*.json'))
+                if matches:
+                    kg_metrics_file = matches[0]
+        
+        if kg_metrics_file and kg_metrics_file.exists():
+            try:
+                with open(kg_metrics_file, 'r') as f:
+                    batch_metrics = json.load(f)
+                
+                # Get the final batch (last entry)
+                if batch_metrics:
+                    final_batch = batch_metrics[-1]
+                    net_metrics = final_batch.get('network_metrics', {})
+                    
+                    net_row = {'epoch': epoch}
+                    for metric in NETWORK_METRICS.keys():
+                        net_row[metric] = net_metrics.get(metric, np.nan)
+                    network_data.append(net_row)
+            except Exception as e:
+                print(f"  Warning: Could not load network metrics for epoch {epoch}: {e}")
+    
+    if network_data:
+        net_df = pd.DataFrame(network_data)
+        # Merge with main dataframe
+        df = df.merge(net_df, on='epoch', how='left')
+        print(f"  Loaded network metrics for {len(network_data)} epochs")
+    else:
+        print("  Warning: No network metrics files found")
+        # Add empty columns
+        for metric in NETWORK_METRICS.keys():
+            df[metric] = np.nan
+    
     return df
 
 
@@ -709,15 +794,333 @@ def plot_build_time_analysis(df: pd.DataFrame, output_dir: Path):
     print(f"  ✓ Saved build_time_analysis.png")
 
 
+# =============================================================================
+# NETWORK SCIENCE VISUALIZATION FUNCTIONS
+# =============================================================================
+
+def plot_network_topology_vs_accuracy(df: pd.DataFrame, output_dir: Path):
+    """Plot key network topology metrics against retrieval accuracy."""
+    metrics_to_plot = ['global_efficiency', 'clustering_coefficient', 'louvain_modularity',
+                       'node_count', 'density', 'avg_path_length']
+    
+    # Filter to only metrics that exist and have variance
+    metrics_to_plot = [m for m in metrics_to_plot if m in df.columns and df[m].notna().sum() > 5]
+    
+    if len(metrics_to_plot) == 0:
+        print("  ⚠ No network metrics available for topology vs accuracy plot")
+        return
+    
+    n_metrics = len(metrics_to_plot)
+    n_cols = 3
+    n_rows = (n_metrics + n_cols - 1) // n_cols
+    
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(14, 4*n_rows))
+    axes = axes.flatten() if n_metrics > 1 else [axes]
+    
+    for i, metric in enumerate(metrics_to_plot):
+        ax = axes[i]
+        
+        # Filter valid data
+        mask = df[metric].notna()
+        x = df.loc[mask, metric]
+        y = df.loc[mask, 'accuracy']
+        
+        if len(x) < 3:
+            ax.text(0.5, 0.5, 'Insufficient data', ha='center', va='center', transform=ax.transAxes)
+            continue
+        
+        # Scatter plot with color = retrieval time
+        scatter = ax.scatter(x, y, c=df.loc[mask, 'avg_retrieval_time'], 
+                            cmap='viridis', s=60, alpha=0.7, edgecolors='white')
+        
+        # Trend line
+        try:
+            from statsmodels.nonparametric.smoothers_lowess import lowess
+            z = lowess(y, x, frac=0.6)
+            ax.plot(z[:, 0], z[:, 1], color='red', linewidth=2.5, label='LOWESS')
+        except:
+            slope, intercept, r, p, se = stats.linregress(x, y)
+            ax.plot(x, slope * x + intercept, 'r-', linewidth=2)
+        
+        r, p = spearmanr(x, y)
+        ax.set_xlabel(NETWORK_METRICS.get(metric, metric))
+        ax.set_ylabel('Accuracy')
+        sig = '***' if p < 0.001 else '**' if p < 0.01 else '*' if p < 0.05 else ''
+        ax.set_title(f'ρ = {r:.3f} {sig}', fontweight='bold')
+        ax.grid(True, alpha=0.3)
+    
+    # Hide unused axes
+    for j in range(i+1, len(axes)):
+        axes[j].axis('off')
+    
+    fig.suptitle('Network Topology vs Retrieval Accuracy\n(color = retrieval time)', 
+                 fontsize=14, fontweight='bold', y=1.02)
+    
+    plt.tight_layout()
+    fig.savefig(output_dir / 'network_topology_vs_accuracy.png', dpi=300)
+    plt.close(fig)
+    print(f"  ✓ Saved network_topology_vs_accuracy.png")
+
+
+def plot_network_metrics_correlation(df: pd.DataFrame, output_dir: Path):
+    """Create correlation heatmap between network metrics and performance metrics."""
+    # Select available network metrics
+    available_net_metrics = [m for m in KEY_NETWORK_METRICS if m in df.columns and df[m].notna().sum() > 5]
+    perf_metrics = ['accuracy', 'avg_retrieval_time', 'kg_build_time']
+    
+    if len(available_net_metrics) == 0:
+        print("  ⚠ No network metrics available for correlation plot")
+        return
+    
+    # Compute correlations
+    corr_data = []
+    for perf in perf_metrics:
+        row = []
+        for net in available_net_metrics:
+            mask = df[net].notna() & df[perf].notna()
+            if mask.sum() > 5:
+                r, _ = spearmanr(df.loc[mask, net], df.loc[mask, perf])
+                row.append(r)
+            else:
+                row.append(np.nan)
+        corr_data.append(row)
+    
+    corr_df = pd.DataFrame(corr_data,
+                          index=['Accuracy', 'Retrieval Time', 'Build Time'],
+                          columns=[NETWORK_METRICS.get(m, m)[:12] for m in available_net_metrics])
+    
+    fig, ax = plt.subplots(figsize=(12, 5))
+    
+    sns.heatmap(corr_df, annot=True, fmt='.2f', cmap='RdBu_r', center=0,
+                ax=ax, vmin=-1, vmax=1, cbar_kws={'shrink': 0.8, 'label': 'Spearman ρ'},
+                linewidths=0.5)
+    
+    ax.set_title('Network Topology ↔ Performance Correlations\n(Spearman ρ)', 
+                 fontsize=14, fontweight='bold')
+    ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha='right')
+    
+    plt.tight_layout()
+    fig.savefig(output_dir / 'network_metrics_correlation.png', dpi=300)
+    plt.close(fig)
+    print(f"  ✓ Saved network_metrics_correlation.png")
+
+
+def plot_small_world_analysis(df: pd.DataFrame, output_dir: Path):
+    """Analyze small-world properties: clustering vs path length trade-off."""
+    if 'clustering_coefficient' not in df.columns or 'avg_path_length' not in df.columns:
+        print("  ⚠ Missing clustering/path length for small-world analysis")
+        return
+    
+    mask = df['clustering_coefficient'].notna() & df['avg_path_length'].notna()
+    if mask.sum() < 5:
+        print("  ⚠ Insufficient data for small-world analysis")
+        return
+    
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    
+    # Panel 1: Clustering vs Path Length (small-world signature)
+    ax1 = axes[0]
+    scatter = ax1.scatter(df.loc[mask, 'avg_path_length'], 
+                         df.loc[mask, 'clustering_coefficient'],
+                         c=df.loc[mask, 'accuracy'], cmap='RdYlGn', 
+                         s=80, alpha=0.8, edgecolors='white')
+    cbar = plt.colorbar(scatter, ax=ax1, shrink=0.8)
+    cbar.set_label('Accuracy')
+    ax1.set_xlabel('Average Path Length')
+    ax1.set_ylabel('Clustering Coefficient')
+    ax1.set_title('Small-World Signature\n(High C, Low L = small-world)', fontweight='bold')
+    ax1.grid(True, alpha=0.3)
+    
+    # Panel 2: Global Efficiency vs Accuracy
+    ax2 = axes[1]
+    if 'global_efficiency' in df.columns:
+        mask2 = mask & df['global_efficiency'].notna()
+        x = df.loc[mask2, 'global_efficiency']
+        y = df.loc[mask2, 'accuracy']
+        scatter2 = ax2.scatter(x, y, c=df.loc[mask2, 'clustering_coefficient'],
+                              cmap='plasma', s=80, alpha=0.8, edgecolors='white')
+        cbar2 = plt.colorbar(scatter2, ax=ax2, shrink=0.8)
+        cbar2.set_label('Clustering')
+        
+        r, p = spearmanr(x, y)
+        ax2.set_xlabel('Global Efficiency')
+        ax2.set_ylabel('Accuracy')
+        ax2.set_title(f'Efficiency → Accuracy (ρ={r:.3f})', fontweight='bold')
+        ax2.grid(True, alpha=0.3)
+    
+    # Panel 3: Modularity vs Accuracy
+    ax3 = axes[2]
+    if 'louvain_modularity' in df.columns:
+        mask3 = df['louvain_modularity'].notna()
+        x = df.loc[mask3, 'louvain_modularity']
+        y = df.loc[mask3, 'accuracy']
+        scatter3 = ax3.scatter(x, y, c=df.loc[mask3, 'louvain_communities'] if 'louvain_communities' in df.columns else 'blue',
+                              cmap='viridis', s=80, alpha=0.8, edgecolors='white')
+        if 'louvain_communities' in df.columns:
+            cbar3 = plt.colorbar(scatter3, ax=ax3, shrink=0.8)
+            cbar3.set_label('# Communities')
+        
+        r, p = spearmanr(x, y)
+        ax3.set_xlabel('Modularity (Q)')
+        ax3.set_ylabel('Accuracy')
+        ax3.set_title(f'Modularity → Accuracy (ρ={r:.3f})', fontweight='bold')
+        ax3.grid(True, alpha=0.3)
+    
+    fig.suptitle('Network Structure Analysis: Small-World & Modularity Properties', 
+                 fontsize=14, fontweight='bold', y=1.02)
+    
+    plt.tight_layout()
+    fig.savefig(output_dir / 'small_world_analysis.png', dpi=300)
+    plt.close(fig)
+    print(f"  ✓ Saved small_world_analysis.png")
+
+
+def plot_graph_size_scaling(df: pd.DataFrame, output_dir: Path):
+    """Analyze how graph size (nodes, edges) scales with parameters and affects performance."""
+    if 'node_count' not in df.columns or 'relationship_count' not in df.columns:
+        print("  ⚠ Missing node/edge counts for size scaling analysis")
+        return
+    
+    mask = df['node_count'].notna() & df['relationship_count'].notna()
+    if mask.sum() < 5:
+        print("  ⚠ Insufficient data for size scaling analysis")
+        return
+    
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    
+    # Panel 1: Node count vs Edge count (graph density analysis)
+    ax1 = axes[0, 0]
+    x = df.loc[mask, 'node_count']
+    y = df.loc[mask, 'relationship_count']
+    scatter = ax1.scatter(x, y, c=df.loc[mask, 'accuracy'], cmap='RdYlGn',
+                         s=80, alpha=0.8, edgecolors='white')
+    cbar = plt.colorbar(scatter, ax=ax1, shrink=0.8)
+    cbar.set_label('Accuracy')
+    
+    # Fit power law: E ~ N^α
+    try:
+        log_n = np.log(x)
+        log_e = np.log(y)
+        slope, intercept, r, p, se = stats.linregress(log_n, log_e)
+        ax1.plot(np.sort(x), np.exp(intercept) * np.sort(x)**slope, 'r--', linewidth=2,
+                label=f'E ∝ N^{slope:.2f} (r²={r**2:.2f})')
+        ax1.legend()
+    except:
+        pass
+    
+    ax1.set_xlabel('Node Count')
+    ax1.set_ylabel('Edge Count')
+    ax1.set_title('Graph Size Scaling', fontweight='bold')
+    ax1.grid(True, alpha=0.3)
+    
+    # Panel 2: Graph size vs Build time
+    ax2 = axes[0, 1]
+    total_elements = df.loc[mask, 'node_count'] + df.loc[mask, 'relationship_count']
+    scatter2 = ax2.scatter(total_elements, df.loc[mask, 'kg_build_time'],
+                          c=df.loc[mask, 'accuracy'], cmap='RdYlGn', s=80, alpha=0.8)
+    r, p = spearmanr(total_elements, df.loc[mask, 'kg_build_time'])
+    ax2.set_xlabel('Total Graph Elements (N + E)')
+    ax2.set_ylabel('Build Time (s)')
+    ax2.set_title(f'Size → Build Time (ρ={r:.3f})', fontweight='bold')
+    ax2.grid(True, alpha=0.3)
+    
+    # Panel 3: Graph size vs Accuracy
+    ax3 = axes[1, 0]
+    scatter3 = ax3.scatter(total_elements, df.loc[mask, 'accuracy'],
+                          c=df.loc[mask, 'avg_retrieval_time'], cmap='viridis', s=80, alpha=0.8)
+    cbar3 = plt.colorbar(scatter3, ax=ax3, shrink=0.8)
+    cbar3.set_label('Retrieval Time')
+    r, p = spearmanr(total_elements, df.loc[mask, 'accuracy'])
+    ax3.set_xlabel('Total Graph Elements')
+    ax3.set_ylabel('Accuracy')
+    ax3.set_title(f'Size → Accuracy (ρ={r:.3f})', fontweight='bold')
+    ax3.grid(True, alpha=0.3)
+    
+    # Panel 4: Graph size vs Retrieval time
+    ax4 = axes[1, 1]
+    scatter4 = ax4.scatter(total_elements, df.loc[mask, 'avg_retrieval_time'],
+                          c=df.loc[mask, 'accuracy'], cmap='RdYlGn', s=80, alpha=0.8)
+    cbar4 = plt.colorbar(scatter4, ax=ax4, shrink=0.8)
+    cbar4.set_label('Accuracy')
+    r, p = spearmanr(total_elements, df.loc[mask, 'avg_retrieval_time'])
+    ax4.set_xlabel('Total Graph Elements')
+    ax4.set_ylabel('Retrieval Time (s)')
+    ax4.set_title(f'Size → Retrieval Time (ρ={r:.3f})', fontweight='bold')
+    ax4.grid(True, alpha=0.3)
+    
+    fig.suptitle('Graph Size Scaling & Performance Impact', fontsize=14, fontweight='bold', y=1.02)
+    
+    plt.tight_layout()
+    fig.savefig(output_dir / 'graph_size_scaling.png', dpi=300)
+    plt.close(fig)
+    print(f"  ✓ Saved graph_size_scaling.png")
+
+
+def plot_network_health_dashboard(df: pd.DataFrame, output_dir: Path):
+    """Create a dashboard showing network health indicators across configurations."""
+    health_metrics = ['global_efficiency', 'graph_robustness', 'louvain_modularity', 
+                      'clustering_coefficient', 'density', 'degree_assortativity']
+    
+    available = [m for m in health_metrics if m in df.columns and df[m].notna().sum() > 5]
+    
+    if len(available) < 3:
+        print("  ⚠ Insufficient network health metrics available")
+        return
+    
+    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+    axes = axes.flatten()
+    
+    for i, metric in enumerate(available[:6]):
+        ax = axes[i]
+        mask = df[metric].notna()
+        data = df.loc[mask, metric]
+        accuracy = df.loc[mask, 'accuracy']
+        
+        # Create violin + strip plot hybrid
+        parts = ax.violinplot([data], positions=[0], showmeans=True, showmedians=True)
+        for pc in parts['bodies']:
+            pc.set_facecolor(COLORS['primary'])
+            pc.set_alpha(0.3)
+        
+        # Overlay scatter colored by accuracy
+        jitter = np.random.normal(0, 0.05, size=len(data))
+        scatter = ax.scatter(jitter, data, c=accuracy, cmap='RdYlGn', s=50, alpha=0.8, edgecolors='white')
+        
+        # Stats annotation
+        r, p = spearmanr(data, accuracy)
+        sig = '***' if p < 0.001 else '**' if p < 0.01 else '*' if p < 0.05 else ''
+        
+        ax.set_title(f'{NETWORK_METRICS.get(metric, metric)}\nρ→Acc: {r:.2f}{sig}', fontweight='bold')
+        ax.set_xticks([])
+        ax.text(0.02, 0.98, f'μ={data.mean():.3f}\nσ={data.std():.3f}', 
+               transform=ax.transAxes, va='top', fontsize=9,
+               bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    
+    # Hide unused
+    for j in range(len(available), 6):
+        axes[j].axis('off')
+    
+    fig.suptitle('Network Health Indicators Dashboard\n(color = accuracy)', 
+                 fontsize=14, fontweight='bold', y=1.02)
+    
+    plt.tight_layout()
+    fig.savefig(output_dir / 'network_health_dashboard.png', dpi=300)
+    plt.close(fig)
+    print(f"  ✓ Saved network_health_dashboard.png")
+
+
 def create_conference_figure(df: pd.DataFrame, optimal: Dict, importance: Dict, 
                              regression: Dict, output_dir: Path):
-    """Create the main conference-ready multi-panel figure."""
+    """Create the main conference-ready multi-panel figure with network science."""
     
-    fig = plt.figure(figsize=(20, 16))
-    gs = gridspec.GridSpec(3, 4, figure=fig, hspace=0.35, wspace=0.3)
+    # Check if network metrics are available
+    has_network = 'global_efficiency' in df.columns and df['global_efficiency'].notna().sum() > 5
+    
+    fig = plt.figure(figsize=(24, 20))
+    gs = gridspec.GridSpec(4, 4, figure=fig, hspace=0.35, wspace=0.35)
     
     # =========================================================================
-    # Panel A: Accuracy vs Time Trade-off (large, top-left)
+    # Panel A: Accuracy vs Time Trade-off (top-left)
     # =========================================================================
     ax_tradeoff = fig.add_subplot(gs[0, :2])
     
@@ -741,7 +1144,7 @@ def create_conference_figure(df: pd.DataFrame, optimal: Dict, importance: Dict,
     
     ax_tradeoff.set_xlabel('Average Retrieval Time (s)')
     ax_tradeoff.set_ylabel('Retrieval Accuracy')
-    ax_tradeoff.set_title('A) Accuracy-Speed Trade-off Space (n=75)', fontweight='bold', fontsize=13)
+    ax_tradeoff.set_title('A) Accuracy-Speed Trade-off Space', fontweight='bold', fontsize=13)
     ax_tradeoff.legend(loc='lower left')
     ax_tradeoff.grid(True, alpha=0.3)
     
@@ -763,7 +1166,7 @@ def create_conference_figure(df: pd.DataFrame, optimal: Dict, importance: Dict,
     ax_importance.axvline(x=0, color='gray', linestyle='--', alpha=0.5)
     
     # =========================================================================
-    # Panel C: Top 2 Parameter Effects (middle row)
+    # Panel C: Top 2 Parameter Effects (second row)
     # =========================================================================
     top_params = importance['accuracy'].head(2)['parameter'].tolist()
     
@@ -789,13 +1192,14 @@ def create_conference_figure(df: pd.DataFrame, optimal: Dict, importance: Dict,
         ax.set_ylabel('Accuracy')
         ax.set_title(f'C{idx+1}) Effect of {PARAM_SHORT[param]} (ρ={r:.3f})', 
                     fontweight='bold', fontsize=13)
+        ax.grid(True, alpha=0.3)
         
         if idx == 1:
             cbar = plt.colorbar(scatter, ax=ax, shrink=0.8)
             cbar.set_label('Retrieval Time (s)')
     
     # =========================================================================
-    # Panel D: Correlation Heatmap (bottom-left)
+    # Panel D: Parameter-Metric Correlation Heatmap (third row left)
     # =========================================================================
     ax_corr = fig.add_subplot(gs[2, :2])
     
@@ -803,7 +1207,6 @@ def create_conference_figure(df: pd.DataFrame, optimal: Dict, importance: Dict,
               'max_merge_instructions', 'max_prune_instructions']
     metrics = ['accuracy', 'avg_retrieval_time', 'kg_build_time']
     
-    # Just parameter vs metrics correlations
     corr_data = []
     for metric in metrics:
         row = []
@@ -818,43 +1221,160 @@ def create_conference_figure(df: pd.DataFrame, optimal: Dict, importance: Dict,
     
     sns.heatmap(corr_df, annot=True, fmt='.2f', cmap='RdBu_r', center=0,
                 ax=ax_corr, vmin=-1, vmax=1, cbar_kws={'shrink': 0.8})
-    ax_corr.set_title('D) Parameter-Metric Correlations (Spearman ρ)', fontweight='bold', fontsize=13)
+    ax_corr.set_title('D) Parameter → Performance Correlations', fontweight='bold', fontsize=13)
     
     # =========================================================================
-    # Panel E: Distribution Summary (bottom-right)
+    # Panel E: Network Topology → Performance (third row right) - NEW
     # =========================================================================
-    ax_dist = fig.add_subplot(gs[2, 2:])
+    ax_net_corr = fig.add_subplot(gs[2, 2:])
     
-    # Violin plots for normalized metrics
-    df_plot = df.copy()
-    for metric in metrics:
-        df_plot[f'{metric}_norm'] = (df[metric] - df[metric].min()) / (df[metric].max() - df[metric].min())
+    if has_network:
+        net_metrics_avail = [m for m in KEY_NETWORK_METRICS if m in df.columns and df[m].notna().sum() > 5]
+        
+        if net_metrics_avail:
+            net_corr_data = []
+            for metric in metrics:
+                row = []
+                for net in net_metrics_avail[:6]:  # Top 6
+                    mask = df[net].notna()
+                    r, _ = spearmanr(df.loc[mask, net], df.loc[mask, metric])
+                    row.append(r)
+                net_corr_data.append(row)
+            
+            net_corr_df = pd.DataFrame(net_corr_data,
+                                       index=['Accuracy', 'Ret. Time', 'Build Time'],
+                                       columns=[NETWORK_METRICS.get(m, m)[:10] for m in net_metrics_avail[:6]])
+            
+            sns.heatmap(net_corr_df, annot=True, fmt='.2f', cmap='RdBu_r', center=0,
+                        ax=ax_net_corr, vmin=-1, vmax=1, cbar_kws={'shrink': 0.8})
+            ax_net_corr.set_title('E) Network Topology → Performance', fontweight='bold', fontsize=13)
+        else:
+            ax_net_corr.text(0.5, 0.5, 'Network metrics\nnot available', ha='center', va='center',
+                            fontsize=14, transform=ax_net_corr.transAxes)
+            ax_net_corr.set_title('E) Network Topology → Performance', fontweight='bold', fontsize=13)
+    else:
+        ax_net_corr.text(0.5, 0.5, 'Network metrics\nnot available', ha='center', va='center',
+                        fontsize=14, transform=ax_net_corr.transAxes)
+        ax_net_corr.set_title('E) Network Topology → Performance', fontweight='bold', fontsize=13)
     
-    violin_data = [df_plot['accuracy_norm'], df_plot['avg_retrieval_time_norm'], df_plot['kg_build_time_norm']]
-    parts = ax_dist.violinplot(violin_data, positions=[1, 2, 3], showmeans=True, showmedians=True)
+    # =========================================================================
+    # Panel F: Small-World Analysis (bottom-left) - NEW
+    # =========================================================================
+    ax_sw = fig.add_subplot(gs[3, 0])
     
-    colors_violin = [COLORS['primary'], COLORS['secondary'], COLORS['tertiary']]
-    for i, pc in enumerate(parts['bodies']):
-        pc.set_facecolor(colors_violin[i])
-        pc.set_alpha(0.7)
+    if has_network and 'clustering_coefficient' in df.columns and 'avg_path_length' in df.columns:
+        mask = df['clustering_coefficient'].notna() & df['avg_path_length'].notna()
+        scatter_sw = ax_sw.scatter(df.loc[mask, 'avg_path_length'], 
+                                   df.loc[mask, 'clustering_coefficient'],
+                                   c=df.loc[mask, 'accuracy'], cmap='RdYlGn', 
+                                   s=80, alpha=0.8, edgecolors='white')
+        cbar_sw = plt.colorbar(scatter_sw, ax=ax_sw, shrink=0.8)
+        cbar_sw.set_label('Accuracy')
+        ax_sw.set_xlabel('Avg Path Length')
+        ax_sw.set_ylabel('Clustering Coeff.')
+        ax_sw.set_title('F) Small-World Signature', fontweight='bold', fontsize=13)
+        ax_sw.grid(True, alpha=0.3)
+    else:
+        ax_sw.text(0.5, 0.5, 'Data not\navailable', ha='center', va='center', fontsize=12)
+        ax_sw.set_title('F) Small-World Signature', fontweight='bold', fontsize=13)
     
-    ax_dist.set_xticks([1, 2, 3])
-    ax_dist.set_xticklabels(['Accuracy', 'Retrieval Time', 'Build Time'])
-    ax_dist.set_ylabel('Normalized Value (0-1)')
-    ax_dist.set_title('E) Metric Distributions (Normalized)', fontweight='bold', fontsize=13)
+    # =========================================================================
+    # Panel G: Global Efficiency → Accuracy (bottom-middle-left) - NEW
+    # =========================================================================
+    ax_eff = fig.add_subplot(gs[3, 1])
     
-    # Add statistics box
-    stats_text = f"""Best Accuracy: {optimal['best_accuracy']['accuracy']:.1%}
-Best Config: Epoch {optimal['best_accuracy']['epoch']}
-Mean Accuracy: {df['accuracy'].mean():.1%} ± {df['accuracy'].std():.1%}
-Accuracy Range: [{df['accuracy'].min():.1%}, {df['accuracy'].max():.1%}]"""
+    if has_network and 'global_efficiency' in df.columns:
+        mask = df['global_efficiency'].notna()
+        x = df.loc[mask, 'global_efficiency']
+        y = df.loc[mask, 'accuracy']
+        scatter_eff = ax_eff.scatter(x, y, c=df.loc[mask, 'clustering_coefficient'] if 'clustering_coefficient' in df.columns else 'blue',
+                                     cmap='plasma', s=80, alpha=0.8, edgecolors='white')
+        if 'clustering_coefficient' in df.columns:
+            cbar_eff = plt.colorbar(scatter_eff, ax=ax_eff, shrink=0.8)
+            cbar_eff.set_label('Clustering')
+        
+        r, p = spearmanr(x, y)
+        sig = '**' if p < 0.01 else '*' if p < 0.05 else ''
+        ax_eff.set_xlabel('Global Efficiency')
+        ax_eff.set_ylabel('Accuracy')
+        ax_eff.set_title(f'G) Efficiency → Accuracy (ρ={r:.2f}{sig})', fontweight='bold', fontsize=13)
+        ax_eff.grid(True, alpha=0.3)
+    else:
+        ax_eff.text(0.5, 0.5, 'Data not\navailable', ha='center', va='center', fontsize=12)
+        ax_eff.set_title('G) Efficiency → Accuracy', fontweight='bold', fontsize=13)
     
-    ax_dist.text(0.02, 0.98, stats_text, transform=ax_dist.transAxes, fontsize=10,
-                verticalalignment='top', fontfamily='monospace',
-                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    # =========================================================================
+    # Panel H: Graph Size Scaling (bottom-middle-right) - NEW
+    # =========================================================================
+    ax_size = fig.add_subplot(gs[3, 2])
+    
+    if has_network and 'node_count' in df.columns and 'relationship_count' in df.columns:
+        mask = df['node_count'].notna() & df['relationship_count'].notna()
+        total_size = df.loc[mask, 'node_count'] + df.loc[mask, 'relationship_count']
+        scatter_size = ax_size.scatter(total_size, df.loc[mask, 'accuracy'],
+                                       c=df.loc[mask, 'avg_retrieval_time'], cmap='viridis',
+                                       s=80, alpha=0.8, edgecolors='white')
+        cbar_size = plt.colorbar(scatter_size, ax=ax_size, shrink=0.8)
+        cbar_size.set_label('Ret. Time')
+        
+        r, p = spearmanr(total_size, df.loc[mask, 'accuracy'])
+        ax_size.set_xlabel('Graph Size (N + E)')
+        ax_size.set_ylabel('Accuracy')
+        ax_size.set_title(f'H) Size → Accuracy (ρ={r:.2f})', fontweight='bold', fontsize=13)
+        ax_size.grid(True, alpha=0.3)
+    else:
+        ax_size.text(0.5, 0.5, 'Data not\navailable', ha='center', va='center', fontsize=12)
+        ax_size.set_title('H) Size → Accuracy', fontweight='bold', fontsize=13)
+    
+    # =========================================================================
+    # Panel I: Summary Statistics Box (bottom-right) - NEW
+    # =========================================================================
+    ax_stats = fig.add_subplot(gs[3, 3])
+    ax_stats.axis('off')
+    
+    # Build comprehensive stats text
+    stats_lines = [
+        f"━━━ EXPERIMENT SUMMARY ━━━",
+        f"",
+        f"Configurations: {len(df)}",
+        f"",
+        f"━━━ BEST RESULTS ━━━",
+        f"Best Accuracy: {optimal['best_accuracy']['accuracy']:.1%}",
+        f"  └ Epoch {optimal['best_accuracy']['epoch']}",
+        f"",
+        f"Best Balanced: {optimal['best_balanced']['accuracy']:.1%}",
+        f"  └ Epoch {optimal['best_balanced']['epoch']}",
+        f"",
+        f"━━━ PERFORMANCE ━━━",
+        f"Accuracy: {df['accuracy'].mean():.1%} ± {df['accuracy'].std():.1%}",
+        f"Range: [{df['accuracy'].min():.1%}, {df['accuracy'].max():.1%}]",
+        f"",
+        f"Ret. Time: {df['avg_retrieval_time'].mean():.2f}s ± {df['avg_retrieval_time'].std():.2f}s",
+        f"Build Time: {df['kg_build_time'].mean():.0f}s ± {df['kg_build_time'].std():.0f}s",
+    ]
+    
+    # Add network stats if available
+    if has_network:
+        stats_lines.extend([
+            f"",
+            f"━━━ NETWORK TOPOLOGY ━━━",
+        ])
+        if 'node_count' in df.columns and df['node_count'].notna().any():
+            stats_lines.append(f"Nodes: {df['node_count'].mean():.0f} ± {df['node_count'].std():.0f}")
+        if 'global_efficiency' in df.columns and df['global_efficiency'].notna().any():
+            stats_lines.append(f"Efficiency: {df['global_efficiency'].mean():.3f} ± {df['global_efficiency'].std():.3f}")
+        if 'clustering_coefficient' in df.columns and df['clustering_coefficient'].notna().any():
+            stats_lines.append(f"Clustering: {df['clustering_coefficient'].mean():.3f} ± {df['clustering_coefficient'].std():.3f}")
+    
+    stats_text = '\n'.join(stats_lines)
+    ax_stats.text(0.05, 0.95, stats_text, transform=ax_stats.transAxes, fontsize=11,
+                 verticalalignment='top', fontfamily='monospace',
+                 bbox=dict(boxstyle='round', facecolor='ivory', edgecolor='gray', alpha=0.9))
     
     # Main title
-    fig.suptitle('Video Memory Knowledge Graph: Parameter Sweep Analysis\n75 Configurations Evaluated',
+    title_text = 'Video Memory Knowledge Graph: Comprehensive Parameter & Network Analysis'
+    subtitle_text = f'{len(df)} Configurations | Parameters + Network Topology'
+    fig.suptitle(f'{title_text}\n{subtitle_text}',
                 fontsize=18, fontweight='bold', y=0.98)
     
     plt.savefig(output_dir / 'conference_figure.png', dpi=300, bbox_inches='tight')
@@ -1003,6 +1523,7 @@ def main():
     parser = argparse.ArgumentParser(description='Analyze parameter sweep results')
     parser.add_argument('--input', '-i', required=True, help='Path to sweep_summary.json')
     parser.add_argument('--output-dir', '-o', default=None, help='Output directory for plots and reports')
+    parser.add_argument('--no-network', action='store_true', help='Skip network metrics analysis')
     args = parser.parse_args()
     
     input_path = Path(args.input)
@@ -1017,9 +1538,11 @@ def main():
         output_dir = input_path.parent / 'analysis'
     
     output_dir.mkdir(parents=True, exist_ok=True)
+    sweep_dir = input_path.parent  # For finding epoch folders
     
     print("=" * 60)
     print("PARAMETER SWEEP ANALYSIS")
+    print("with Network Science Metrics")
     print("=" * 60)
     print(f"\nInput: {input_path}")
     print(f"Output: {output_dir}")
@@ -1029,6 +1552,10 @@ def main():
     print("Loading data...")
     df = load_sweep_data(input_path)
     print(f"  Loaded {len(df)} successful configurations")
+    
+    # Load network metrics if available
+    if not args.no_network:
+        df = load_network_metrics(df, sweep_dir)
     print()
     
     # Statistical analysis
@@ -1060,10 +1587,20 @@ def main():
     plot_epoch_progression(df, output_dir)
     plot_boxplots_by_parameter(df, output_dir)
     plot_build_time_analysis(df, output_dir)
+    
+    # Network science visualizations
+    if not args.no_network:
+        print()
+        print("Generating network science visualizations...")
+        plot_network_topology_vs_accuracy(df, output_dir)
+        plot_network_metrics_correlation(df, output_dir)
+        plot_small_world_analysis(df, output_dir)
+        plot_graph_size_scaling(df, output_dir)
+        plot_network_health_dashboard(df, output_dir)
     print()
     
     # Create conference figure
-    print("Creating conference figure...")
+    print("Creating comprehensive conference figure...")
     create_conference_figure(df, optimal, importance, regression, output_dir)
     print()
     
@@ -1081,6 +1618,15 @@ def main():
     print(f"\nMean Accuracy: {df['accuracy'].mean():.2%} ± {df['accuracy'].std():.2%}")
     print(f"Accuracy Range: [{df['accuracy'].min():.2%}, {df['accuracy'].max():.2%}]")
     print(f"\nTop Parameter for Accuracy: {PARAM_SHORT.get(importance['accuracy'].iloc[0]['parameter'], importance['accuracy'].iloc[0]['parameter'])}")
+    
+    # Print network summary if available
+    if 'global_efficiency' in df.columns and df['global_efficiency'].notna().any():
+        print(f"\n--- Network Topology Summary ---")
+        print(f"Avg Nodes: {df['node_count'].mean():.0f} | Avg Edges: {df['relationship_count'].mean():.0f}")
+        print(f"Global Efficiency: {df['global_efficiency'].mean():.3f} ± {df['global_efficiency'].std():.3f}")
+        if 'clustering_coefficient' in df.columns:
+            print(f"Clustering Coeff.: {df['clustering_coefficient'].mean():.3f} ± {df['clustering_coefficient'].std():.3f}")
+    
     print(f"\nAll outputs saved to: {output_dir}")
     print()
     
@@ -1092,6 +1638,19 @@ def main():
         'regression_results': regression,
         'anova_results': anova,
     }
+    
+    # Add network stats if available
+    if 'global_efficiency' in df.columns and df['global_efficiency'].notna().any():
+        results_json['network_stats'] = {
+            metric: {
+                'mean': float(df[metric].mean()),
+                'std': float(df[metric].std()),
+                'min': float(df[metric].min()),
+                'max': float(df[metric].max()),
+            }
+            for metric in NETWORK_METRICS.keys()
+            if metric in df.columns and df[metric].notna().any()
+        }
     
     with open(output_dir / 'analysis_results.json', 'w') as f:
         json.dump(results_json, f, indent=2, default=str)
