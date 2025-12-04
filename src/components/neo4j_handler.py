@@ -742,6 +742,472 @@ class Neo4jHandler:
             logger.error(f"Error getting relationship count: {str(e)}")
             return 0
 
+    # ========== Community High Graph Methods ==========
+
+    async def create_chunk_questions(self, chunk_questions: Dict[str, List[str]], batch_idx: int = 0) -> int:
+        """
+        Create ChunkQuestion nodes and link them to their parent Chunk nodes.
+        
+        Args:
+            chunk_questions: Dict mapping chunk_id -> list of questions
+            batch_idx: Current batch index for tracking
+            
+        Returns:
+            Number of questions created
+        """
+        if not chunk_questions:
+            return 0
+        
+        created_count = 0
+        try:
+            async with self.driver.session() as session:
+                for chunk_id, questions in chunk_questions.items():
+                    for q_idx, question in enumerate(questions):
+                        question_id = f"{chunk_id}_q{q_idx}"
+                        
+                        # Create ChunkQuestion node and link to parent Chunk
+                        await session.run(
+                            """
+                            MATCH (c:Chunk:GraphNode {id: $chunk_id, graph_uuid: $graph_uuid})
+                            MERGE (q:ChunkQuestion:GraphNode {id: $question_id, graph_uuid: $graph_uuid})
+                            SET q.question = $question,
+                                q.chunk_id = $chunk_id,
+                                q.batch_id = $batch_idx,
+                                q.created_at = datetime()
+                            MERGE (c)-[:HAS_QUESTION]->(q)
+                            """,
+                            chunk_id=chunk_id,
+                            question_id=question_id,
+                            question=question,
+                            batch_idx=batch_idx,
+                            graph_uuid=self.run_uuid
+                        )
+                        created_count += 1
+                
+                logger.info(f"Created {created_count} ChunkQuestion nodes across {len(chunk_questions)} chunks")
+                return created_count
+        except Exception as e:
+            logger.error(f"Error creating chunk questions: {e}")
+            return created_count
+
+    async def get_all_chunks_with_questions(self) -> List[Dict[str, Any]]:
+        """
+        Get all Chunk nodes with their associated questions.
+        
+        Returns:
+            List of dicts with chunk_id, content, questions, and community_id (if set)
+        """
+        try:
+            async with self.driver.session() as session:
+                result = await session.run(
+                    """
+                    MATCH (c:Chunk:GraphNode {graph_uuid: $graph_uuid})
+                    OPTIONAL MATCH (c)-[:HAS_QUESTION]->(q:ChunkQuestion)
+                    WITH c, collect(q.question) as questions
+                    RETURN c.id as chunk_id, c.content as content, 
+                           c.community_id as community_id, questions
+                    """,
+                    graph_uuid=self.run_uuid
+                )
+                
+                chunks = []
+                async for record in result:
+                    chunks.append({
+                        "chunk_id": record["chunk_id"],
+                        "content": record["content"],
+                        "community_id": record["community_id"],
+                        "questions": record["questions"] or []
+                    })
+                
+                return chunks
+        except Exception as e:
+            logger.error(f"Error getting chunks with questions: {e}")
+            return []
+
+    async def update_chunk_community_ids(self, chunk_community_map: Dict[str, str]) -> int:
+        """
+        Update community_id property on Chunk nodes.
+        
+        Args:
+            chunk_community_map: Dict mapping chunk_id -> community_id (stable hash)
+            
+        Returns:
+            Number of chunks updated
+        """
+        if not chunk_community_map:
+            return 0
+        
+        updated_count = 0
+        try:
+            async with self.driver.session() as session:
+                for chunk_id, community_id in chunk_community_map.items():
+                    result = await session.run(
+                        """
+                        MATCH (c:Chunk:GraphNode {id: $chunk_id, graph_uuid: $graph_uuid})
+                        SET c.community_id = $community_id,
+                            c.prev_community_id = c.community_id
+                        RETURN count(c) as updated
+                        """,
+                        chunk_id=chunk_id,
+                        community_id=community_id,
+                        graph_uuid=self.run_uuid
+                    )
+                    record = await result.single()
+                    if record and record["updated"] > 0:
+                        updated_count += 1
+                
+                logger.debug(f"Updated community_id on {updated_count} chunks")
+                return updated_count
+        except Exception as e:
+            logger.error(f"Error updating chunk community IDs: {e}")
+            return updated_count
+
+    async def upsert_community_summary(self, community_id: str, content: str, embedding: List[float], 
+                                       member_chunk_ids: List[str], 
+                                       question_chunks: List[str] = None,
+                                       embedding_chunks: List[List[float]] = None) -> bool:
+        """
+        Create or update a CommunitySummary node with chunked embeddings.
+        
+        Args:
+            community_id: Stable hash ID for the community
+            content: Full concatenated questions from member chunks
+            embedding: Primary vector embedding (first chunk or full content)
+            member_chunk_ids: List of chunk IDs belonging to this community
+            question_chunks: List of question text chunks (for sparse-to-dense)
+            embedding_chunks: List of embeddings, one per question_chunk (for MaxSim retrieval)
+            
+        Returns:
+            True if successful
+        """
+        try:
+            import json
+            # Normalize embedding_chunks to a list of JSON strings, because Neo4j properties do not support nested lists
+            if embedding_chunks is None:
+                embedding_chunks_serialized = [json.dumps(embedding)]
+            else:
+                embedding_chunks_serialized = []
+                for emb in embedding_chunks:
+                    # If already a string, assume it's serialized
+                    if isinstance(emb, str):
+                        embedding_chunks_serialized.append(emb)
+                    else:
+                        # Convert numpy arrays or other iterables to list of floats
+                        try:
+                            emb_list = [float(x) for x in emb]
+                        except Exception:
+                            emb_list = list(emb)
+                        embedding_chunks_serialized.append(json.dumps(emb_list))
+
+            async with self.driver.session() as session:
+                await session.run(
+                    """
+                    MERGE (cs:CommunitySummary:GraphNode {community_id: $community_id, graph_uuid: $graph_uuid})
+                    SET cs.content = $content,
+                        cs.embedding = $embedding,
+                        cs.member_chunk_ids = $member_chunk_ids,
+                        cs.question_chunks = $question_chunks,
+                        cs.embedding_chunks = $embedding_chunks,
+                        cs.num_embedding_chunks = $num_chunks,
+                        cs.updated_at = datetime()
+                    """,
+                    community_id=community_id,
+                    content=content,
+                    embedding=embedding,
+                    member_chunk_ids=member_chunk_ids,
+                    question_chunks=question_chunks or [content],
+                    embedding_chunks=embedding_chunks_serialized,
+                    num_chunks=len(embedding_chunks_serialized) if embedding_chunks_serialized else 1,
+                    graph_uuid=self.run_uuid
+                )
+                return True
+        except Exception as e:
+            logger.error(f"Error upserting community summary {community_id}: {e}")
+            return False
+
+    async def get_all_community_summaries(self) -> List[Dict[str, Any]]:
+        """
+        Get all CommunitySummary nodes for the current graph.
+        
+        Returns:
+            List of dicts with community_id, content, embedding, member_chunk_ids
+        """
+        try:
+            async with self.driver.session() as session:
+                result = await session.run(
+                    """
+                    MATCH (cs:CommunitySummary:GraphNode {graph_uuid: $graph_uuid})
+                    RETURN cs.community_id as community_id, cs.content as content,
+                           cs.embedding as embedding, cs.member_chunk_ids as member_chunk_ids,
+                           cs.embedding_chunks as embedding_chunks, cs.num_embedding_chunks as num_chunks
+                    """,
+                    graph_uuid=self.run_uuid
+                )
+                
+                summaries = []
+                import json
+                async for record in result:
+                    raw_chunks = record.get("embedding_chunks")
+                    parsed_chunks = []
+                    if raw_chunks:
+                        for item in raw_chunks:
+                            if isinstance(item, str):
+                                try:
+                                    parsed_chunks.append(json.loads(item))
+                                except Exception:
+                                    continue
+                            elif isinstance(item, list):
+                                parsed_chunks.append(item)
+
+                    summaries.append({
+                        "community_id": record["community_id"],
+                        "content": record["content"],
+                        "embedding": record["embedding"],
+                        "member_chunk_ids": record["member_chunk_ids"] or [],
+                        "embedding_chunks": parsed_chunks,
+                        "num_chunks": record.get("num_chunks", 1)
+                    })
+                
+                return summaries
+        except Exception as e:
+            logger.error(f"Error getting community summaries: {e}")
+            return []
+
+    async def delete_orphan_community_summaries(self, valid_community_ids: List[str]) -> int:
+        """
+        Delete CommunitySummary nodes whose community_id is no longer valid.
+        
+        Args:
+            valid_community_ids: List of currently valid community IDs
+            
+        Returns:
+            Number of summaries deleted
+        """
+        try:
+            async with self.driver.session() as session:
+                result = await session.run(
+                    """
+                    MATCH (cs:CommunitySummary:GraphNode {graph_uuid: $graph_uuid})
+                    WHERE NOT cs.community_id IN $valid_ids
+                    DETACH DELETE cs
+                    RETURN count(cs) as deleted
+                    """,
+                    valid_ids=valid_community_ids,
+                    graph_uuid=self.run_uuid
+                )
+                record = await result.single()
+                deleted = record["deleted"] if record else 0
+                if deleted > 0:
+                    logger.info(f"Deleted {deleted} orphan CommunitySummary nodes")
+                return deleted
+        except Exception as e:
+            logger.error(f"Error deleting orphan community summaries: {e}")
+            return 0
+
+    async def get_chunks_in_community(self, community_id: str) -> List[Dict[str, Any]]:
+        """
+        Get all chunks belonging to a specific community.
+        
+        Args:
+            community_id: The community ID to query
+            
+        Returns:
+            List of chunk dicts with id, content, questions
+        """
+        try:
+            async with self.driver.session() as session:
+                result = await session.run(
+                    """
+                    MATCH (c:Chunk:GraphNode {graph_uuid: $graph_uuid, community_id: $community_id})
+                    OPTIONAL MATCH (c)-[:HAS_QUESTION]->(q:ChunkQuestion)
+                    WITH c, collect(q.question) as questions
+                    RETURN c.id as chunk_id, c.content as content, questions
+                    """,
+                    graph_uuid=self.run_uuid,
+                    community_id=community_id
+                )
+                
+                chunks = []
+                async for record in result:
+                    chunks.append({
+                        "chunk_id": record["chunk_id"],
+                        "content": record["content"],
+                        "questions": record["questions"] or []
+                    })
+                
+                return chunks
+        except Exception as e:
+            logger.error(f"Error getting chunks in community {community_id}: {e}")
+            return []
+
+    async def vector_search_community_summaries(self, query_embedding: List[float], top_k: int = 5, 
+                                                min_similarity: float = 0.3) -> List[Dict[str, Any]]:
+        """
+        Vector similarity search on CommunitySummary node embeddings using MaxSim scoring.
+        
+        For communities with multiple embedding chunks (sparse-to-dense), computes similarity
+        against each chunk and takes the maximum (ColBERT-style MaxSim).
+        
+        Args:
+            query_embedding: Query embedding vector
+            top_k: Number of top results to return
+            min_similarity: Minimum cosine similarity threshold
+            
+        Returns:
+            List of community summaries with similarity scores and member chunk ids
+        """
+        try:
+            async with self.driver.session() as session:
+                # Get all communities with their embedding chunks
+                result = await session.run(
+                    """
+                    MATCH (cs:CommunitySummary:GraphNode {graph_uuid: $graph_uuid})
+                    WHERE cs.embedding IS NOT NULL
+                    RETURN cs.community_id AS community_id, 
+                           cs.content AS content, 
+                           cs.member_chunk_ids AS member_chunk_ids,
+                           cs.embedding AS embedding,
+                           cs.embedding_chunks AS embedding_chunks,
+                           cs.num_embedding_chunks AS num_chunks
+                    """,
+                    graph_uuid=self.run_uuid
+                )
+                
+                # Compute MaxSim scores in Python for flexibility
+                import math
+                import json
+
+                def cosine_sim(v1, v2):
+                    dot = sum(a * b for a, b in zip(v1, v2))
+                    mag1 = math.sqrt(sum(a * a for a in v1))
+                    mag2 = math.sqrt(sum(b * b for b in v2))
+                    if mag1 * mag2 == 0:
+                        return 0.0
+                    return dot / (mag1 * mag2)
+                
+                summaries = []
+                async for record in result:
+                    raw_chunks = record.get("embedding_chunks")
+                    embedding_chunks = []
+                    if raw_chunks:
+                        # raw_chunks can be stored as JSON strings or lists depending on node version
+                        for item in raw_chunks:
+                            if isinstance(item, str):
+                                try:
+                                    emb = json.loads(item)
+                                except Exception:
+                                    # If parsing fails, skip the chunk
+                                    continue
+                            else:
+                                emb = item
+                            # Ensure it's a numeric vector
+                            if isinstance(emb, list) and emb:
+                                embedding_chunks.append(emb)
+
+                    # MaxSim: take max similarity across all embedding chunks
+                    if embedding_chunks:
+                        max_sim = max(cosine_sim(query_embedding, emb) for emb in embedding_chunks)
+                    else:
+                        # Fallback to primary embedding
+                        max_sim = cosine_sim(query_embedding, record["embedding"])
+                    
+                    if max_sim > min_similarity:
+                        summaries.append({
+                            "community_id": record["community_id"],
+                            "content": record["content"],
+                            "member_chunk_ids": record["member_chunk_ids"] or [],
+                            "score": float(max_sim),
+                            "num_chunks": record.get("num_chunks", 1),
+                            "source": "community_maxsim"
+                        })
+                
+                # Sort by score and limit
+                summaries.sort(key=lambda x: x["score"], reverse=True)
+                summaries = summaries[:top_k]
+                
+                logger.debug(f"Community MaxSim search returned {len(summaries)} summaries")
+                return summaries
+        except Exception as e:
+            logger.error(f"Error in community vector search: {e}")
+            return []
+
+    async def get_chunks_by_ids(self, chunk_ids: List[str]) -> List[Dict[str, Any]]:
+        """
+        Get chunks by their IDs.
+        
+        Args:
+            chunk_ids: List of chunk IDs to retrieve
+            
+        Returns:
+            List of chunk dicts with id, content, time
+        """
+        if not chunk_ids:
+            return []
+        
+        try:
+            async with self.driver.session() as session:
+                result = await session.run(
+                    """
+                    MATCH (c:Chunk:GraphNode {graph_uuid: $graph_uuid})
+                    WHERE c.id IN $chunk_ids
+                    RETURN c.id AS chunk_id, c.content AS content, c.time AS chunk_time
+                    """,
+                    graph_uuid=self.run_uuid,
+                    chunk_ids=chunk_ids
+                )
+                
+                chunks = []
+                async for record in result:
+                    chunks.append({
+                        "id": record["chunk_id"],
+                        "content": record["content"],
+                        "time": record["chunk_time"],
+                        "source": "community_hop"
+                    })
+                
+                return chunks
+        except Exception as e:
+            logger.error(f"Error getting chunks by IDs: {e}")
+            return []
+
+    async def get_entities_from_chunks(self, chunk_ids: List[str]) -> List[Dict[str, Any]]:
+        """
+        Get all entities connected to the given chunks.
+        
+        Args:
+            chunk_ids: List of chunk IDs
+            
+        Returns:
+            List of entity dicts with name, batch_time
+        """
+        if not chunk_ids:
+            return []
+        
+        try:
+            async with self.driver.session() as session:
+                result = await session.run(
+                    """
+                    MATCH (c:Chunk:GraphNode {graph_uuid: $graph_uuid})-[:CONTAINS]->(e:Entity:GraphNode)
+                    WHERE c.id IN $chunk_ids
+                    RETURN DISTINCT e.name AS name, e.batch_time AS batch_time
+                    """,
+                    graph_uuid=self.run_uuid,
+                    chunk_ids=chunk_ids
+                )
+                
+                entities = []
+                async for record in result:
+                    entities.append({
+                        "name": record["name"],
+                        "batch_time": record["batch_time"] or "",
+                        "source": "community_hop"
+                    })
+                
+                return entities
+        except Exception as e:
+            logger.error(f"Error getting entities from chunks: {e}")
+            return []
+
     async def close(self):
         """Close the Neo4j driver connection"""
         await self.driver.close()

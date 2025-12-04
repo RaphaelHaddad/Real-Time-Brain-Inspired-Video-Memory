@@ -94,6 +94,15 @@ class BenchmarkLLMConfig(BaseModel):
     top_p: float = 0.9
     max_tokens: int = 2048
 
+class CommunityHighGraphConfig(BaseModel):
+    """Configuration for community-based high-level graph construction and retrieval"""
+    community_creator: bool = False  # Enable community-aware KG building with question generation
+    community_retriever: bool = False  # Enable community-based retrieval (similarity on CommunitySummary nodes)
+    question_per_chunk: int = 2  # Number of questions to generate per chunk
+    frequency_incremental_leiden: int = 5  # Run Leiden community detection every N batches
+    community_resolution: float = 1.0  # Gamma parameter for Leiden algorithm resolution
+    debug_print_community: int = 3  # Number of random community descriptions to log at DEBUG level
+
 class PipelineConfig(BaseModel):
     video: VideoConfig
     vlm: VLMConfig
@@ -104,6 +113,7 @@ class PipelineConfig(BaseModel):
     neo4j: Neo4jConfig
     retrieval: RetrievalConfig
     benchmark_llm: Optional[BenchmarkLLMConfig] = None
+    community_high_graph: CommunityHighGraphConfig = CommunityHighGraphConfig()
     # Save batch-level network metrics to a separate file after each batch
     saving_batch_metrics: bool = True
 

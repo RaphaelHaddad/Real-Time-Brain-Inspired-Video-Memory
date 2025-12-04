@@ -1,6 +1,7 @@
 """
 Hybrid Retrieval: Vector search on chunks + Entity search with graph traversal + Contextual compression
 Implements: 1) Parallel vector/fulltext search, 2) Graph hop expansion, 3) Post-compression
+            4) Community-based retrieval (optional)
 """
 
 import asyncio
@@ -9,7 +10,7 @@ import json
 import httpx
 from pathlib import Path
 from typing import List, Dict, Any, Optional
-from ..core.config import RetrievalConfig
+from ..core.config import RetrievalConfig, CommunityHighGraphConfig
 from ..components.neo4j_handler import Neo4jHandler
 from ..core.logger import get_logger
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -23,12 +24,14 @@ class RerankerError(Exception):
     pass
 
 class HybridRetriever:
-    """Hybrid retrieval: chunks (vector) + entities (fulltext) + graph traversal + compression"""
+    """Hybrid retrieval: chunks (vector) + entities (fulltext) + graph traversal + compression + community retrieval"""
 
-    def __init__(self, config: RetrievalConfig, neo4j_handler: Neo4jHandler, schedule_path: Optional[str], realtime_output: bool = True):
+    def __init__(self, config: RetrievalConfig, neo4j_handler: Neo4jHandler, schedule_path: Optional[str], 
+                 realtime_output: bool = True, community_config: Optional[CommunityHighGraphConfig] = None):
         self.config = config
         self.neo4j_handler = neo4j_handler
         self.schedule_path = schedule_path
+        self.community_config = community_config
         self.retrieval_schedule = self._load_retrieval_schedule() if schedule_path else []
         self.executed_queries = []
         self.executed_query_keys = set()  # Track (query, scheduled_time) tuples to prevent duplicates
@@ -46,9 +49,12 @@ class HybridRetriever:
         else:
             self.embedder = None
         
+        # Log community retrieval status
+        community_retriever_enabled = community_config and community_config.community_retriever
         logger.info(f"Initialized HybridRetriever: chunks_top_k={config.top_k_chunks}, "
                    f"entities_top_k={config.top_k_entities}, graph_hops={config.graph_hops}, "
-                   f"post_compression={config.post_compression}")
+                   f"post_compression={config.post_compression}, "
+                   f"community_retriever={community_retriever_enabled}")
 
     def _load_retrieval_schedule(self) -> List[Dict[str, str]]:
         """Load retrieval schedule from JSON file"""
@@ -143,10 +149,12 @@ class HybridRetriever:
         """
         Perform hybrid retrieval:
         1. Vector search on chunks (top_k_chunks) or skip if entity_first
+           OR community retrieval if community_retriever is enabled
         2. Fulltext search on entities (top_k_entities)
         3. Graph traversal from entities (graph_hops)
         4. Post-compression (if enabled and not entity_first)
         5. Reranking (after traversal if rerank_after_traversal, else after vector)
+           NOTE: Community summaries are NOT included in reranking - only chunks/entities
         
         Returns:
             tuple: (result_text, reranking_performed) where reranking_performed is True if reranking was attempted and succeeded
@@ -156,17 +164,33 @@ class HybridRetriever:
             retrieval_start = time.perf_counter()
             reranking_performed = False
             
+            # Check if community retrieval is enabled
+            use_community_retrieval = (
+                self.community_config and 
+                self.community_config.community_retriever
+            )
+            
             async with self.neo4j_handler.driver.session() as session:
-                # Step 1: Parallel vector + fulltext search (skip vector if entity_first)
+                # Step 1: Parallel vector + fulltext search (skip vector if entity_first or using community)
                 chunk_search_start = time.perf_counter()
-                if self.config.entity_first:
+                
+                if use_community_retrieval:
+                    # Community-based retrieval: search CommunitySummary nodes first
+                    logger.info("🏘️ Using community-based retrieval")
+                    chunk_results, entity_results, community_results = await self._perform_community_retrieval(query)
+                    search_time = time.perf_counter() - chunk_search_start
+                    logger.debug(f"Community search complete: {len(chunk_results)} chunks, {len(entity_results)} entities, "
+                                f"{len(community_results)} communities in {search_time:.3f}s")
+                elif self.config.entity_first:
                     chunk_results = []
                     entity_results = await self._fulltext_search_entities(session, query)
+                    community_results = []
                 else:
                     chunk_results, entity_results = await asyncio.gather(
                         self._vector_search_chunks(session, query),
                         self._fulltext_search_entities(session, query)
                     )
+                    community_results = []
                 search_time = time.perf_counter() - chunk_search_start
                 logger.debug(f"Search complete: {len(chunk_results)} chunks, {len(entity_results)} entities in {search_time:.3f}s")
 
@@ -321,6 +345,71 @@ class HybridRetriever:
         except Exception as e:
             logger.warning(f"Vector search failed: {e}")
             return []
+
+    async def _perform_community_retrieval(self, query: str) -> tuple[List[Dict], List[Dict], List[Dict]]:
+        """
+        Perform community-based retrieval:
+        1. Vector search on CommunitySummary descriptions
+        2. Hop from top communities to their member chunks
+        3. Get entities connected to those chunks
+        
+        NOTE: Community summaries themselves are returned separately and NOT included in reranking.
+        Only chunks and entities from the community hop are reranked.
+        
+        Returns:
+            tuple: (chunks, entities, community_summaries)
+        """
+        try:
+            logger.info(f"🏘️ Community retrieval for query: '{query}'")
+            
+            # Step 1: Get query embedding
+            query_embedding = await self.neo4j_handler.embedder.aembed_query(query)
+            
+            # Step 2: Search CommunitySummary nodes by vector similarity
+            community_summaries = await self.neo4j_handler.vector_search_community_summaries(
+                query_embedding=query_embedding,
+                top_k=self.config.top_k_chunks,  # Use same top_k as chunks
+                min_similarity=0.3
+            )
+            
+            if not community_summaries:
+                logger.info("No community summaries found, falling back to standard retrieval")
+                return [], [], []
+            
+            logger.info(f"Found {len(community_summaries)} relevant communities")
+            for i, cs in enumerate(community_summaries[:3], 1):
+                logger.debug(f"  Community {i}: {cs['community_id']} (score: {cs['score']:.3f}) - "
+                            f"{len(cs['member_chunk_ids'])} chunks")
+            
+            # Step 3: Collect all member chunk IDs from top communities
+            all_chunk_ids = []
+            for cs in community_summaries:
+                all_chunk_ids.extend(cs.get('member_chunk_ids', []))
+            
+            # Deduplicate while preserving order (higher-scoring communities first)
+            seen_ids = set()
+            unique_chunk_ids = []
+            for cid in all_chunk_ids:
+                if cid not in seen_ids:
+                    seen_ids.add(cid)
+                    unique_chunk_ids.append(cid)
+            
+            # Limit to top_k_chunks
+            unique_chunk_ids = unique_chunk_ids[:self.config.top_k_chunks * 2]  # Get more for filtering
+            
+            # Step 4: Get chunk details
+            chunks = await self.neo4j_handler.get_chunks_by_ids(unique_chunk_ids)
+            logger.debug(f"Retrieved {len(chunks)} chunks from communities")
+            
+            # Step 5: Get entities connected to these chunks
+            entities = await self.neo4j_handler.get_entities_from_chunks(unique_chunk_ids)
+            logger.debug(f"Retrieved {len(entities)} entities from community chunks")
+            
+            return chunks, entities, community_summaries
+            
+        except Exception as e:
+            logger.error(f"Community retrieval failed: {e}")
+            return [], [], []
 
     async def _fulltext_search_entities(self, session, query: str) -> List[Dict[str, Any]]:
         """Fulltext search on entity names"""

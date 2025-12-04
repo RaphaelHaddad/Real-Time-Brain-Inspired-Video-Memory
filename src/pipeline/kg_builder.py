@@ -15,6 +15,7 @@ from ..components.network_info import NetworkInfoProvider
 from .acs_automata import ACSAutomata
 from .retriever_hybrid import HybridRetriever
 from tqdm.asyncio import tqdm
+from langchain_openai import OpenAIEmbeddings
 
 logger = get_logger(__name__)
 
@@ -26,8 +27,27 @@ class KGBuilder:
         self.neo4j_handler = Neo4jHandler(config.neo4j, config.kg, self.run_uuid)
         self.llm_injector = LLMInjector(config.llm_injector, config.chunking)
         self.network_info_provider = NetworkInfoProvider(self.neo4j_handler)
-        self.acs_automata = ACSAutomata(self.neo4j_handler)
         self.online_retriever = None  # Initialize when needed
+        
+        # Community config for high-level graph features
+        self.community_config = config.community_high_graph
+        self._community_enabled = self.community_config.community_creator
+        
+        # Initialize embedder for community features
+        self.embedder = None
+        if self._community_enabled:
+            self.embedder = OpenAIEmbeddings(
+                model=config.kg.embedding_model,
+                openai_api_key=config.kg.embedding_api_key,
+                openai_api_base=config.kg.embedding_endpoint
+            )
+        
+        # Initialize ACS Automata with optional community detection
+        self.acs_automata = ACSAutomata(
+            self.neo4j_handler, 
+            self.community_config if self._community_enabled else None,
+            self.embedder
+        )
 
         # Initialize hierarchical extraction pipeline if enabled
         self.pre_llm_injector = None
@@ -41,14 +61,19 @@ class KGBuilder:
                 model=config.llm_injector.model_name,
                 temperature=0.2,
             )
-            self.pre_llm_injector = PreLLMInjector(pre_llm, config.chunking, config.embedder, config.llm_injector)
+            # Pass community config to pre_llm_injector for question generation
+            self.pre_llm_injector = PreLLMInjector(
+                pre_llm, config.chunking, config.embedder, config.llm_injector, 
+                self.community_config if self._community_enabled else None
+            )
 
             if config.chunking.enable_global_refinement:
                 self.global_refiner = GlobalRefiner(config.llm_injector, config.chunking)
 
         logger.info(
             f"Initialized KG Builder with run UUID: {self.run_uuid} "
-            f"(hierarchical extraction: {config.chunking.enabled})"
+            f"(hierarchical extraction: {config.chunking.enabled}, "
+            f"community_creator: {self._community_enabled})"
         )
 
     async def build_knowledge_graph(self, vlm_json_path: str, retrieval_schedule_path: Optional[str] = None) -> str:
@@ -75,7 +100,8 @@ class KGBuilder:
                 self.online_retriever = HybridRetriever(
                     self.config.retrieval,
                     self.neo4j_handler,
-                    retrieval_schedule_path
+                    retrieval_schedule_path,
+                    community_config=self.community_config
                 )
                 logger.info(f"Initialized hybrid retriever with {len(self.online_retriever.retrieval_schedule)} scheduled queries")
 
@@ -131,16 +157,23 @@ class KGBuilder:
                 llm_start = time.perf_counter()
                 pre_triplets = []
                 global_limit = self.config.chunking.global_triplet_limit
+                chunk_questions = {}  # For community features
                 
                 # Step 1: Pre-extraction via hierarchical chunking
                 text_chunks = []
                 if self.pre_llm_injector:
                     pre_start = time.perf_counter()
-                    pre_triplets, text_chunks, subgraphs = await self.pre_llm_injector.extract_local_triplets(
+                    # Now returns 4 values including chunk_questions
+                    pre_triplets, text_chunks, subgraphs, chunk_questions = await self.pre_llm_injector.extract_local_triplets(
                         aggregated_content, network_info, self.neo4j_handler, batch_idx, self.run_uuid
                     )
                     pre_time = time.perf_counter() - pre_start
                     logger.info(f"Pre-extraction: {len(pre_triplets)} triplets in {pre_time:.2f}s")
+                    
+                    # Log questions if community features enabled
+                    if self._community_enabled and chunk_questions:
+                        total_q = sum(len(q) for q in chunk_questions.values())
+                        logger.info(f"Generated {total_q} questions across {len(chunk_questions)} chunks")
 
                     # Write splitter chunks and per-chunk triplets to the trace
                     try:
@@ -154,6 +187,10 @@ class KGBuilder:
                                 tf.write(det.get('chunk_text',''))
                                 tf.write("\nTriplets:\n")
                                 tf.write(json.dumps(det.get('triplets', []), ensure_ascii=False, indent=2))
+                                # Include questions if community enabled
+                                if det.get('questions'):
+                                    tf.write("\nQuestions:\n")
+                                    tf.write(json.dumps(det.get('questions', []), ensure_ascii=False, indent=2))
                                 if det.get('error'):
                                     tf.write(f"\nError: {det['error']}\n")
                                 tf.write("\n\n")
@@ -204,6 +241,12 @@ class KGBuilder:
                     text_chunks=text_chunks,
                     operations=(locals().get('operations') if 'operations' in locals() else None)
                 )
+                
+                # Create chunk questions if community features enabled
+                if self._community_enabled and chunk_questions:
+                    questions_created = await self.neo4j_handler.create_chunk_questions(chunk_questions, batch_idx)
+                    logger.info(f"Created {questions_created} ChunkQuestion nodes")
+                
                 neo4j_time = time.perf_counter() - neo4j_start
                 # Validate chunk creation: log counts for quick verification that
                 # chunk nodes were created and, where appropriate, have embeddings
@@ -217,6 +260,13 @@ class KGBuilder:
                 acs_start = time.perf_counter()
                 acs_metrics = await self.acs_automata.update_metrics()
                 acs_time = time.perf_counter() - acs_start
+                
+                # Run community detection if due (based on frequency_incremental_leiden)
+                community_metrics = None
+                if self._community_enabled:
+                    community_metrics = await self.acs_automata.run_community_detection_if_due(batch_idx)
+                    if community_metrics:
+                        logger.info(f"Community detection completed: {community_metrics.get('num_communities', 0)} communities")
 
                 # Check for online retrieval
                 retrieval_metrics = []
@@ -247,12 +297,23 @@ class KGBuilder:
                         "acs_metrics": acs_time
                     },
                     retrieval_metrics,
-                    acs_metrics
+                    acs_metrics,
+                    community_metrics
                 )
 
                 logger.info(f"Batch {batch_idx + 1} timings - Agg: {aggregation_time:.2f}s, NetInfo: {network_info_time:.2f}s, LLM: {llm_time:.2f}s, Clean: {clean_time:.2f}s, Neo4j: {neo4j_time:.2f}s, ACS: {acs_time:.2f}s")
                 logger.info(f"Batch {batch_idx + 1} completed in {batch_time:.2f}s")
                 batch_progress.update(1)
+
+            # Final community detection pass at end of pipeline (if not done on last batch)
+            if self._community_enabled:
+                final_community_stats = await self.acs_automata.run_community_detection_if_due(total_batches - 1)
+                if not final_community_stats:
+                    # Force final run if not done recently
+                    logger.info("Running final community detection pass")
+                    final_community_stats = await self.acs_automata.community_detector.update_communities(self.embedder)
+                    if final_community_stats:
+                        logger.info(f"Final community detection: {final_community_stats.get('num_communities', 0)} communities")
 
             # Final metrics and cleanup
             self.metrics.save_metrics(f"metrics/kg_{self.run_uuid}.json")
@@ -262,6 +323,9 @@ class KGBuilder:
             if self.config.chunking.enabled:
                 logger.info(f"Hierarchical extraction enabled: chunk_size={self.config.chunking.chunk_size}, "
                            f"parallel={self.config.chunking.parallel_count}")
+            if self._community_enabled:
+                logger.info(f"Community high graph enabled: frequency={self.community_config.frequency_incremental_leiden}, "
+                           f"resolution={self.community_config.community_resolution}")
 
             return self.run_uuid
 
@@ -301,7 +365,8 @@ class KGBuilder:
         return cleaned
 
     def _record_batch_metrics(self, batch_idx: int, total_time: float, timings: Dict[str, float],
-                             retrieval_metrics: List[Dict], acs_metrics: Dict[str, Any]):
+                             retrieval_metrics: List[Dict], acs_metrics: Dict[str, Any], 
+                             community_metrics: Optional[Dict[str, Any]] = None):
         """Record comprehensive metrics for this batch"""
         batch_metrics = {
             "batch_idx": batch_idx,
@@ -310,7 +375,8 @@ class KGBuilder:
             "total_time": total_time,
             **timings,
             "retrieval_queries": retrieval_metrics,
-            "acs_metrics": acs_metrics
+            "acs_metrics": acs_metrics,
+            "community_metrics": community_metrics
         }
 
         self.metrics.add_batch_metrics(batch_metrics)
@@ -333,7 +399,8 @@ class KGBuilder:
                     "batch_idx": batch_idx,
                     "timestamp": time.time(),
                     "total_time": total_time,
-                    "network_metrics": acs_metrics
+                    "network_metrics": acs_metrics,
+                    "community_metrics": community_metrics
                 }
                 existing.append(entry)
                 out_path.parent.mkdir(parents=True, exist_ok=True)

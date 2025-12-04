@@ -1,19 +1,20 @@
 """
 Pre-LLM Injector: Hierarchical chunking & local triplet extraction
 Uses TokenTextSplitter + LLMGraphTransformer for efficient local extraction
+Supports community-based question generation when enabled.
 """
 
 import asyncio
 import json
 import random
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from langchain_core.prompts import ChatPromptTemplate
-from .prompts import build_pre_llm_prompt_template
+from .prompts import build_pre_llm_prompt_template, build_pre_llm_with_questions_prompt_template
 from langchain_text_splitters import TokenTextSplitter
 from langchain_experimental.graph_transformers import LLMGraphTransformer
 from langchain_core.language_models import BaseChatModel
 from langchain_core.documents import Document
-from ..core.config import ChunkingConfig, EmbedderConfig, LLMInjectorConfig
+from ..core.config import ChunkingConfig, EmbedderConfig, LLMInjectorConfig, CommunityHighGraphConfig
 from ..core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -22,17 +23,30 @@ logger = get_logger(__name__)
 class PreLLMInjector:
     """Local extraction from chunks using optimized pipe-delimited LLM calls"""
 
-    def __init__(self, llm: BaseChatModel, config: ChunkingConfig, embedder_config: EmbedderConfig = None, llm_injector_config: LLMInjectorConfig = None):
+    def __init__(self, llm: BaseChatModel, config: ChunkingConfig, embedder_config: EmbedderConfig = None, 
+                 llm_injector_config: LLMInjectorConfig = None, community_config: CommunityHighGraphConfig = None):
         self.config = config
         self.llm = llm
         self.embedder_config = embedder_config
         self.llm_injector_config = llm_injector_config
+        self.community_config = community_config
         # Holds details from the last extraction for external tracing/logging
         self.last_chunk_details: List[Dict[str, Any]] = []
-        # Build a ChatPromptTemplate using the centralized prompts module so prompts
-        # can be edited in one place. The helper will inject the configured
-        # max_triplets while preserving the {input} placeholder.
-        self.prompt_template = build_pre_llm_prompt_template(config.max_triplets_per_chunk)
+        
+        # Check if community-based question generation is enabled
+        self._community_enabled = community_config and community_config.community_creator
+        self._questions_per_chunk = community_config.question_per_chunk if community_config else 2
+        
+        # Build prompt templates based on whether community features are enabled
+        if self._community_enabled:
+            # Use combined prompt for efficiency (single LLM call for triplets + questions)
+            self.prompt_template = build_pre_llm_with_questions_prompt_template(
+                config.max_triplets_per_chunk, self._questions_per_chunk
+            )
+            logger.info(f"Community features ENABLED: generating {self._questions_per_chunk} questions per chunk")
+        else:
+            # Use original triplet-only prompt
+            self.prompt_template = build_pre_llm_prompt_template(config.max_triplets_per_chunk)
 
         # Create a simple chain for direct LLM calls
         self.chain = self.llm
@@ -47,7 +61,8 @@ class PreLLMInjector:
             f"Initialized PreLLMInjector: chunk_size={config.chunk_size}, "
             f"overlap={config.chunk_overlap}, parallel={config.parallel_count}, "
             f"max_triplets_per_chunk={config.max_triplets_per_chunk}, "
-            f"subgraph_extraction={llm_injector_config.subgraph_extraction_injection if llm_injector_config else False}"
+            f"subgraph_extraction={llm_injector_config.subgraph_extraction_injection if llm_injector_config else False}, "
+            f"community_creator={self._community_enabled}"
         )
 
     def _truncate_text(self, text: str, max_words: int = 25) -> str:
@@ -61,9 +76,10 @@ class PreLLMInjector:
 
     async def extract_local_triplets(
         self, content: str, network_info: str = "", neo4j_handler = None, batch_idx: int = 0, run_uuid: str = ""
-    ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, str]]:
+    ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, str], Dict[str, List[str]]]:
         """
-        Extract triplets from content using hierarchical chunking + local extraction
+        Extract triplets from content using hierarchical chunking + local extraction.
+        When community_creator is enabled, also extracts questions from each chunk.
 
         Args:
             content: Aggregated VLM output text
@@ -77,6 +93,7 @@ class PreLLMInjector:
             - List of triplet dicts with 'head', 'relation', 'tail', 'source_chunks'
             - List of chunk dicts with 'id', 'content', 'embedding' (if available)
             - Dict of subgraph strings keyed by chunk_id (for similar chunks)
+            - Dict of questions keyed by chunk_id (only when community_creator is enabled)
         """
         try:
             # Split content into manageable chunks
@@ -100,15 +117,29 @@ class PreLLMInjector:
 
             if not chunks_text:
                 logger.warning("No chunks produced from content")
-                return [], [], {}
+                return [], [], {}, {}
 
-            # Extract triplets from each chunk in parallel
+            # Extract triplets (and optionally questions) from each chunk
+            chunk_questions: Dict[str, List[str]] = {}
+            
             if self.llm_injector_config and self.llm_injector_config.subgraph_extraction_injection:
                 triplets, updated_chunk_data, subgraphs = await self._parallel_chunk_extraction_with_similarity(chunk_data, neo4j_handler)
+                # Extract questions from last_chunk_details if community is enabled
+                if self._community_enabled:
+                    for detail in self.last_chunk_details:
+                        questions = detail.get('questions', [])
+                        if questions:
+                            chunk_questions[detail['chunk_id']] = questions
             else:
                 triplets = await self._parallel_chunk_extraction(chunk_data)
                 updated_chunk_data = chunk_data
                 subgraphs = {}
+                # Extract questions from last_chunk_details if community is enabled
+                if self._community_enabled:
+                    for detail in self.last_chunk_details:
+                        questions = detail.get('questions', [])
+                        if questions:
+                            chunk_questions[detail['chunk_id']] = questions
 
             # Deduplicate at local level (preserves source_chunks)
             triplets = self._deduplicate_triplets(triplets)
@@ -116,11 +147,15 @@ class PreLLMInjector:
             logger.info(
                 f"Extracted {len(triplets)} local triplets from {len(chunks_text)} chunks"
             )
-            return triplets, updated_chunk_data, subgraphs
+            if self._community_enabled:
+                total_questions = sum(len(q) for q in chunk_questions.values())
+                logger.info(f"Generated {total_questions} questions across {len(chunk_questions)} chunks")
+                
+            return triplets, updated_chunk_data, subgraphs, chunk_questions
 
         except Exception as e:
             logger.error(f"Pre-LLM extraction failed: {str(e)}")
-            return [], [], {}
+            return [], [], {}, {}
 
     async def _parallel_chunk_extraction(
         self, chunk_data: List[Dict[str, Any]]
@@ -136,15 +171,16 @@ class PreLLMInjector:
             self.last_chunk_details = []
             for i, chunk in enumerate(chunks):
                 try:
-                    result = await self._extract_chunk_triplets(chunk, i, chunk_ids[i])
-                    logger.debug(f"Chunk {i} returned {len(result)} triplets")
+                    triplets, questions = await self._extract_chunk_triplets(chunk, i, chunk_ids[i])
+                    logger.debug(f"Chunk {i} returned {len(triplets)} triplets, {len(questions)} questions")
                     self.last_chunk_details.append({
                         "chunk_index": i,
                         "chunk_id": chunk_ids[i],
                         "chunk_text": chunk,
-                        "triplets": result,
+                        "triplets": triplets,
+                        "questions": questions,
                     })
-                    all_triplets.extend(result)
+                    all_triplets.extend(triplets)
                 except Exception as e:
                     logger.warning(f"Chunk {i} extraction failed: {e}")
                     self.last_chunk_details.append({
@@ -152,6 +188,7 @@ class PreLLMInjector:
                         "chunk_id": chunk_ids[i],
                         "chunk_text": chunk,
                         "triplets": [],
+                        "questions": [],
                         "error": str(e),
                     })
             return all_triplets
@@ -160,7 +197,7 @@ class PreLLMInjector:
         # Limit concurrency to avoid overwhelming the LLM
         semaphore = asyncio.Semaphore(self.config.parallel_count)
 
-        async def extract_with_semaphore(chunk_idx: int, chunk: str, chunk_id: str) -> List[Dict[str, Any]]:
+        async def extract_with_semaphore(chunk_idx: int, chunk: str, chunk_id: str) -> tuple[List[Dict[str, Any]], List[str]]:
             async with semaphore:
                 return await self._extract_chunk_triplets(chunk, chunk_idx, chunk_id)
 
@@ -181,17 +218,20 @@ class PreLLMInjector:
                     "chunk_id": chunk_ids[i],
                     "chunk_text": chunks[i],
                     "triplets": [],
+                    "questions": [],
                     "error": str(result),
                 })
             else:
-                logger.debug(f"Chunk {i} returned {len(result)} triplets")
+                triplets, questions = result
+                logger.debug(f"Chunk {i} returned {len(triplets)} triplets, {len(questions)} questions")
                 self.last_chunk_details.append({
                     "chunk_index": i,
                     "chunk_id": chunk_ids[i],
                     "chunk_text": chunks[i],
-                    "triplets": result,
+                    "triplets": triplets,
+                    "questions": questions,
                 })
-                all_triplets.extend(result)
+                all_triplets.extend(triplets)
 
         return all_triplets
 
@@ -286,15 +326,16 @@ class PreLLMInjector:
             self.last_chunk_details = []
             for i, chunk in enumerate(chunks):
                 try:
-                    result = await self._extract_chunk_triplets(chunk, i, chunk_ids[i])
-                    logger.debug(f"Chunk {i} returned {len(result)} triplets")
+                    triplets, questions = await self._extract_chunk_triplets(chunk, i, chunk_ids[i])
+                    logger.debug(f"Chunk {i} returned {len(triplets)} triplets, {len(questions)} questions")
                     self.last_chunk_details.append({
                         "chunk_index": i,
                         "chunk_id": chunk_ids[i],
                         "chunk_text": chunk,
-                        "triplets": result,
+                        "triplets": triplets,
+                        "questions": questions,
                     })
-                    all_triplets.extend(result)
+                    all_triplets.extend(triplets)
                 except Exception as e:
                     logger.warning(f"Chunk {i} extraction failed: {e}")
                     self.last_chunk_details.append({
@@ -302,13 +343,14 @@ class PreLLMInjector:
                         "chunk_id": chunk_ids[i],
                         "chunk_text": chunk,
                         "triplets": [],
+                        "questions": [],
                         "error": str(e),
                     })
             return all_triplets, chunk_data, subgraphs
         
         # Parallel LLM extraction (original logic)
         semaphore = asyncio.Semaphore(self.config.parallel_count)
-        async def extract_with_semaphore(chunk_idx: int, chunk: str, chunk_id: str) -> List[Dict[str, Any]]:
+        async def extract_with_semaphore(chunk_idx: int, chunk: str, chunk_id: str) -> tuple[List[Dict[str, Any]], List[str]]:
             async with semaphore:
                 return await self._extract_chunk_triplets(chunk, chunk_idx, chunk_id)
         
@@ -329,17 +371,20 @@ class PreLLMInjector:
                     "chunk_id": chunk_ids[i],
                     "chunk_text": chunks[i],
                     "triplets": [],
+                    "questions": [],
                     "error": str(result),
                 })
             else:
-                logger.debug(f"Chunk {i} returned {len(result)} triplets")
+                triplets, questions = result
+                logger.debug(f"Chunk {i} returned {len(triplets)} triplets, {len(questions)} questions")
                 self.last_chunk_details.append({
                     "chunk_index": i,
                     "chunk_id": chunk_ids[i],
                     "chunk_text": chunks[i],
-                    "triplets": result,
+                    "triplets": triplets,
+                    "questions": questions,
                 })
-                all_triplets.extend(result)
+                all_triplets.extend(triplets)
 
         return all_triplets, chunk_data, subgraphs
 
@@ -507,9 +552,12 @@ class PreLLMInjector:
             logger.warning(f"Failed to extract subgraph for chunk {chunk_id}: {e}")
             return ""
 
-    async def _extract_chunk_triplets(self, chunk_text: str, chunk_idx: int, chunk_id: str) -> List[Dict]:
+    async def _extract_chunk_triplets(self, chunk_text: str, chunk_idx: int, chunk_id: str) -> tuple[List[Dict], List[str]]:
         """
-        Extracts triplets from a single chunk using the LLM with a STRICT TIMEOUT.
+        Extracts triplets (and optionally questions) from a single chunk using the LLM with a STRICT TIMEOUT.
+        
+        Returns:
+            Tuple of (triplets list, questions list). Questions list is empty if community features disabled.
         """
         prompt = self.prompt_template.invoke({"input": chunk_text})
         
@@ -527,11 +575,22 @@ class PreLLMInjector:
                     timeout=timeout_seconds
                 )
 
-                # Parse the pipe-delimited output
+                # Parse the output
                 llm_output = getattr(response, 'content', str(response)).strip()
-                triplets = self._parse_pipe_delimited_output(llm_output, chunk_idx, chunk_id)
-                logger.debug(f"Extracted {len(triplets)} triplets from chunk {chunk_idx} (attempt {attempt+1})")
-                return triplets
+                
+                if self._community_enabled:
+                    # Parse combined triplets + questions output
+                    triplets, questions = self._parse_combined_output(llm_output, chunk_idx, chunk_id)
+                    logger.debug(f"Extracted {len(triplets)} triplets and {len(questions)} questions from chunk {chunk_idx} (attempt {attempt+1})")
+                    # Log questions at debug level
+                    for q in questions:
+                        logger.debug(f"  Question from chunk {chunk_idx}: {q}")
+                    return triplets, questions
+                else:
+                    # Parse triplets only (original behavior)
+                    triplets = self._parse_pipe_delimited_output(llm_output, chunk_idx, chunk_id)
+                    logger.debug(f"Extracted {len(triplets)} triplets from chunk {chunk_idx} (attempt {attempt+1})")
+                    return triplets, []
 
             except asyncio.TimeoutError:
                 # If we have retries left, log and continue; otherwise skip
@@ -545,11 +604,77 @@ class PreLLMInjector:
                     continue
                 else:
                     logger.warning(f"⚠️ Chunk {chunk_idx} TIMED OUT after {timeout_seconds}s on final attempt. Skipping.")
-                    return []
+                    return [], []
 
             except Exception as e:
                 logger.error(f"Error extracting from chunk {chunk_idx} (attempt {attempt+1}): {e}")
-                return []
+                return [], []
+        
+        return [], []
+
+    def _parse_combined_output(self, llm_output: str, chunk_idx: int, chunk_id: str) -> tuple[List[Dict[str, Any]], List[str]]:
+        """Parse combined triplets + questions output from the LLM"""
+        triplets = []
+        questions = []
+        
+        # Split by sections
+        lines = llm_output.strip().split('\n')
+        
+        # Track which section we're in
+        in_triplets = False
+        in_questions = False
+        
+        for line in lines:
+            line_stripped = line.strip()
+            line_lower = line_stripped.lower()
+            
+            # Detect section headers
+            if 'triplets:' in line_lower or line_lower == 'triplets':
+                in_triplets = True
+                in_questions = False
+                continue
+            elif 'questions:' in line_lower or line_lower == 'questions':
+                in_triplets = False
+                in_questions = True
+                continue
+            
+            # Skip empty lines
+            if not line_stripped:
+                continue
+            
+            # Parse triplets (pipe-delimited)
+            if in_triplets and '|' in line_stripped:
+                parts = line_stripped.split('|')
+                if len(parts) == 3:
+                    head = parts[0].strip()
+                    relation = parts[1].strip()
+                    tail = parts[2].strip()
+                    
+                    if head and relation and tail:
+                        triplet = {
+                            "head": head,
+                            "relation": relation,
+                            "tail": tail,
+                            "source_chunks": [chunk_id]
+                        }
+                        triplets.append(triplet)
+                        
+                        # Respect max_triplets_per_chunk limit
+                        if len(triplets) >= self.config.max_triplets_per_chunk:
+                            in_triplets = False
+            
+            # Parse questions (one per line)
+            elif in_questions:
+                # Clean up the question (remove numbering, bullets, etc.)
+                question = line_stripped.lstrip('0123456789.-) ').strip()
+                if question and len(question) > 5:  # Minimum question length
+                    questions.append(question)
+                    
+                    # Respect questions_per_chunk limit
+                    if len(questions) >= self._questions_per_chunk:
+                        in_questions = False
+        
+        return triplets, questions
 
     def _parse_pipe_delimited_output(self, llm_output: str, chunk_idx: int, chunk_id: str) -> List[Dict[str, Any]]:
         """Parse pipe-delimited triplet output into dict format"""

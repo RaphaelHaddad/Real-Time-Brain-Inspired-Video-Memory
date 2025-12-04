@@ -4,6 +4,7 @@ Centralized prompt templates for VidGraph components.
 OPTIMIZATIONS:
 - PRE_LLM: Switched to Pipe-delimited output ("Head | Relation | Tail") to reduce token generation.
 - LLM_INJECTOR: Switched to JSON List-of-Lists format to reduce structure overhead while maintaining strict parsing for source tracking.
+- QUESTION_GENERATION: Added for community-based retrieval - generates predictive questions from chunks.
 """
 from langchain_core.prompts import ChatPromptTemplate
 
@@ -27,6 +28,60 @@ INPUT TEXT:
 {input}
 
 OUTPUT:
+"""
+
+# QUESTION GENERATION: For community-based high-level graph
+# Generates predictive questions that users might ask about the chunk content
+QUESTION_GENERATION_PROMPT_TEMPLATE = """
+Based on the video content below, generate {num_questions} concise questions that a user might naturally ask about this content later.
+
+GUIDELINES:
+- Questions should be specific to the content, not generic
+- Use a natural, human conversational tone
+- Focus on key actions, objects, measurements, or notable details
+- Questions should help predict what someone might want to know
+- Keep questions short and direct (1 line each)
+
+STRICT FORMAT:
+- Output ONE question per line
+- No numbering, bullets, or prefixes
+- Max {num_questions} questions
+
+INPUT TEXT:
+{input}
+
+QUESTIONS:
+"""
+
+# Combined triplet + question extraction for efficiency (single LLM call)
+PRE_LLM_WITH_QUESTIONS_PROMPT_TEMPLATE = """
+Analyze the video content below and extract:
+1. Observable entities and relationships (triplets)
+2. Predictive questions users might ask
+
+=== TRIPLET EXTRACTION ===
+STRICT FORMAT:
+- Output ONE triplet per line under "TRIPLETS:"
+- Use format: Entity1 | relation_in_snake_case | Entity2
+- Max {max_triplets} triplets
+
+=== QUESTION GENERATION ===
+Generate {num_questions} concise questions about this content.
+GUIDELINES:
+- Specific to content, natural human tone
+- Focus on actions, objects, measurements, notable details
+- Short and direct (1 line each)
+
+STRICT FORMAT:
+- Output ONE question per line under "QUESTIONS:"
+- No numbering or prefixes
+
+INPUT TEXT:
+{input}
+
+TRIPLETS:
+
+QUESTIONS:
 """
 
 # OPTIMIZATION 2: Compact JSON Arrays
@@ -121,6 +176,16 @@ Return strictly JSON: {{"is_correct": true}} or {{"is_correct": false}}
 
 def build_pre_llm_prompt_template(max_triplets: int) -> ChatPromptTemplate:
     text = PRE_LLM_PROMPT_TEMPLATE.replace("{max_triplets}", str(max_triplets))
+    return ChatPromptTemplate.from_template(text)
+
+def build_question_generation_prompt_template(num_questions: int) -> ChatPromptTemplate:
+    """Build prompt template for standalone question generation"""
+    text = QUESTION_GENERATION_PROMPT_TEMPLATE.replace("{num_questions}", str(num_questions))
+    return ChatPromptTemplate.from_template(text)
+
+def build_pre_llm_with_questions_prompt_template(max_triplets: int, num_questions: int) -> ChatPromptTemplate:
+    """Build combined triplet + question extraction prompt for efficiency"""
+    text = PRE_LLM_WITH_QUESTIONS_PROMPT_TEMPLATE.replace("{max_triplets}", str(max_triplets)).replace("{num_questions}", str(num_questions))
     return ChatPromptTemplate.from_template(text)
 
 def get_llm_injector_prompt_template() -> ChatPromptTemplate:

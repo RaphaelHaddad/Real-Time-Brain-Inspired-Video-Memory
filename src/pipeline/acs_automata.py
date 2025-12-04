@@ -1,22 +1,425 @@
 from ..core.logger import get_logger
+from ..core.config import CommunityHighGraphConfig
 from ..components.neo4j_handler import Neo4jHandler
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional, Tuple
 import time
+import hashlib
+import random
+import statistics
+import asyncio
 import networkx as nx
 import math
 
 logger = get_logger(__name__)
 
+
+class CommunityDetector:
+    """
+    Handles Incremental Leiden community detection for the community-based high-level graph.
+    Designed for modularity and readability since this is a collaborative component.
+    """
+    
+    def __init__(self, neo4j_handler: Neo4jHandler, config: CommunityHighGraphConfig, embedder=None):
+        self.neo4j_handler = neo4j_handler
+        self.config = config
+        self.embedder = embedder
+        self._last_community_state: Dict[str, str] = {}  # chunk_id -> community_id cache
+        
+    def compute_stable_community_id(self, member_chunk_ids: List[str]) -> str:
+        """
+        Compute a stable community ID from member chunk IDs.
+        Using hash of sorted chunk IDs to ensure stability across runs.
+        
+        Args:
+            member_chunk_ids: List of chunk IDs in the community
+            
+        Returns:
+            16-character hex hash as stable community ID
+        """
+        sorted_ids = sorted(member_chunk_ids)
+        hash_input = "-".join(sorted_ids).encode()
+        return hashlib.sha256(hash_input).hexdigest()[:16]
+    
+    async def detect_communities(self, G: nx.Graph) -> Dict[int, List[str]]:
+        """
+        Run Leiden community detection on the graph.
+        
+        Args:
+            G: NetworkX graph (undirected)
+            
+        Returns:
+            Dict mapping numeric community label -> list of node IDs
+        """
+        try:
+            # Check if leiden is available (requires cdlib or leidenalg)
+            try:
+                import leidenalg
+                import igraph as ig
+                return await self._leiden_with_leidenalg(G)
+            except ImportError:
+                logger.warning("leidenalg not available, falling back to Louvain")
+                return self._louvain_fallback(G)
+        except Exception as e:
+            logger.error(f"Community detection failed: {e}")
+            return {}
+    
+    async def _leiden_with_leidenalg(self, G: nx.Graph) -> Dict[int, List[str]]:
+        """Run Leiden using leidenalg library"""
+        import leidenalg
+        import igraph as ig
+        
+        # Convert NetworkX to igraph
+        ig_graph = ig.Graph.from_networkx(G)
+        
+        # Run Leiden with configured resolution
+        partition = leidenalg.find_partition(
+            ig_graph, 
+            leidenalg.RBConfigurationVertexPartition,
+            resolution_parameter=self.config.community_resolution
+        )
+        
+        # Convert to dict format
+        communities: Dict[int, List[str]] = {}
+        for comm_idx, members in enumerate(partition):
+            node_ids = [ig_graph.vs[m]['_nx_name'] for m in members]
+            communities[comm_idx] = node_ids
+        
+        return communities
+    
+    def _louvain_fallback(self, G: nx.Graph) -> Dict[int, List[str]]:
+        """Fallback to Louvain if Leiden not available"""
+        if not hasattr(nx.community, 'louvain_communities'):
+            logger.warning("Louvain not available in NetworkX version")
+            return {}
+        
+        communities_list = nx.community.louvain_communities(
+            G, 
+            resolution=self.config.community_resolution,
+            seed=42
+        )
+        
+        communities: Dict[int, List[str]] = {}
+        for comm_idx, members in enumerate(communities_list):
+            communities[comm_idx] = list(members)
+        
+        return communities
+    
+    async def update_communities(self, embedder) -> Dict[str, Any]:
+        """
+        Main entry point: Run community detection and update the graph.
+        
+        Returns:
+            Summary dict with stats about the community update
+        """
+        start_time = time.perf_counter()
+        stats = {
+            "num_communities": 0,
+            "questions_per_community": {"avg": 0, "median": 0, "std": 0, "min": 0, "max": 0},
+            "changed_communities": 0,
+            "new_summaries_created": 0,
+            "orphan_summaries_deleted": 0,
+            "community_detection_time": 0,
+            "embedding_time": 0,
+            "total_time": 0
+        }
+        
+        try:
+            # Step 1: Build graph for community detection (Chunk nodes connected via Entity relationships)
+            detection_start = time.perf_counter()
+            G = await self._build_chunk_graph()
+            
+            if G.number_of_nodes() == 0:
+                logger.info("No chunks found for community detection")
+                return stats
+            
+            # Step 2: Run community detection
+            communities = await self.detect_communities(G)
+            stats["num_communities"] = len(communities)
+            stats["community_detection_time"] = time.perf_counter() - detection_start
+            
+            if not communities:
+                logger.warning("No communities detected")
+                return stats
+            
+            # Step 3: Compute stable IDs and map chunks to communities
+            chunk_to_community: Dict[str, str] = {}
+            community_members: Dict[str, List[str]] = {}  # stable_id -> chunk_ids
+            
+            for _, member_ids in communities.items():
+                # Filter to only Chunk node IDs
+                chunk_ids = [nid for nid in member_ids if await self._is_chunk_node(nid)]
+                if not chunk_ids:
+                    continue
+                    
+                stable_id = self.compute_stable_community_id(chunk_ids)
+                community_members[stable_id] = chunk_ids
+                
+                for chunk_id in chunk_ids:
+                    chunk_to_community[chunk_id] = stable_id
+            
+            # Step 4: Identify changed communities
+            changed = 0
+            for chunk_id, new_comm in chunk_to_community.items():
+                old_comm = self._last_community_state.get(chunk_id)
+                if old_comm != new_comm:
+                    changed += 1
+            stats["changed_communities"] = changed
+            
+            # Step 5: Update chunk community_id properties
+            await self.neo4j_handler.update_chunk_community_ids(chunk_to_community)
+            self._last_community_state = chunk_to_community.copy()
+            
+            # Step 6: Compute questions per community statistics
+            # Fetch all questions once per community (not per chunk!)
+            questions_counts = []
+            community_questions: Dict[str, List[str]] = {}  # stable_id -> all questions
+            
+            for stable_id, chunk_ids in community_members.items():
+                # Call once per community, not per chunk
+                chunks_data = await self.neo4j_handler.get_chunks_in_community(stable_id)
+                all_questions = []
+                for chunk in chunks_data:
+                    all_questions.extend(chunk.get("questions", []))
+                community_questions[stable_id] = list(set(all_questions))  # Deduplicate
+                questions_counts.append(len(community_questions[stable_id]))
+            
+            if questions_counts:
+                stats["questions_per_community"] = {
+                    "avg": round(statistics.mean(questions_counts), 2),
+                    "median": round(statistics.median(questions_counts), 2),
+                    "std": round(statistics.stdev(questions_counts), 2) if len(questions_counts) > 1 else 0,
+                    "min": min(questions_counts),
+                    "max": max(questions_counts)
+                }
+                logger.info(f"📊 Questions per community: avg={stats['questions_per_community']['avg']}, "
+                           f"median={stats['questions_per_community']['median']}, "
+                           f"std={stats['questions_per_community']['std']}, "
+                           f"min={stats['questions_per_community']['min']}, "
+                           f"max={stats['questions_per_community']['max']}")
+            
+            # Step 7: Create/update CommunitySummary nodes with embeddings (parallel)
+            embedding_start = time.perf_counter()
+            summaries_created = await self._update_community_summaries(
+                community_members, community_questions, embedder
+            )
+            stats["new_summaries_created"] = summaries_created
+            stats["embedding_time"] = time.perf_counter() - embedding_start
+            
+            # Step 8: Delete orphan summaries
+            valid_ids = list(community_members.keys())
+            deleted = await self.neo4j_handler.delete_orphan_community_summaries(valid_ids)
+            stats["orphan_summaries_deleted"] = deleted
+            
+            stats["total_time"] = time.perf_counter() - start_time
+            
+            # Logging
+            logger.info(
+                f"Community detection complete: {stats['num_communities']} communities, "
+                f"questions_per_community avg={stats['questions_per_community']['avg']:.1f} "
+                f"median={stats['questions_per_community']['median']:.1f} "
+                f"std={stats['questions_per_community']['std']:.1f} "
+                f"min={stats['questions_per_community']['min']} "
+                f"max={stats['questions_per_community']['max']}, "
+                f"detection_time={stats['community_detection_time']:.2f}s, "
+                f"embedding_time={stats['embedding_time']:.2f}s"
+            )
+            
+            # Debug: print random community descriptions
+            if self.config.debug_print_community > 0 and community_questions:
+                sample_size = min(self.config.debug_print_community, len(community_questions))
+                sample_ids = random.sample(list(community_questions.keys()), sample_size)
+                for comm_id in sample_ids:
+                    questions = community_questions.get(comm_id, [])
+                    logger.debug(f"Community {comm_id} questions ({len(questions)}): {questions[:5]}...")
+            
+            return stats
+            
+        except Exception as e:
+            logger.error(f"Community update failed: {e}")
+            stats["error"] = str(e)
+            stats["total_time"] = time.perf_counter() - start_time
+            return stats
+    
+    async def _build_chunk_graph(self) -> nx.Graph:
+        """
+        Build an undirected graph of Chunk nodes connected via shared entities.
+        Two chunks are connected if they share at least one entity (via FROM_CHUNK relationships).
+        """
+        G = nx.Graph()
+        
+        try:
+            async with self.neo4j_handler.driver.session() as session:
+                # Get all chunks
+                chunk_result = await session.run(
+                    """
+                    MATCH (c:Chunk:GraphNode {graph_uuid: $graph_uuid})
+                    RETURN c.id as chunk_id
+                    """,
+                    graph_uuid=self.neo4j_handler.run_uuid
+                )
+                chunk_ids = [rec["chunk_id"] async for rec in chunk_result]
+                G.add_nodes_from(chunk_ids)
+                
+                # Get chunk connections via shared entities
+                edge_result = await session.run(
+                    """
+                    MATCH (c1:Chunk:GraphNode {graph_uuid: $graph_uuid})<-[:FROM_CHUNK]-(e:Entity)-[:FROM_CHUNK]->(c2:Chunk:GraphNode {graph_uuid: $graph_uuid})
+                    WHERE c1.id < c2.id
+                    RETURN DISTINCT c1.id as chunk1, c2.id as chunk2
+                    """,
+                    graph_uuid=self.neo4j_handler.run_uuid
+                )
+                edges = [(rec["chunk1"], rec["chunk2"]) async for rec in edge_result]
+                G.add_edges_from(edges)
+                
+            return G
+        except Exception as e:
+            logger.error(f"Error building chunk graph: {e}")
+            return nx.Graph()
+    
+    async def _is_chunk_node(self, node_id: str) -> bool:
+        """Check if a node ID belongs to a Chunk node"""
+        # Simple heuristic based on ID format
+        # Chunk IDs typically contain underscores like "uuid_batch_chunk"
+        return "_" in str(node_id)
+    
+    async def _update_community_summaries(
+        self, 
+        community_members: Dict[str, List[str]], 
+        community_questions: Dict[str, List[str]],
+        embedder
+    ) -> int:
+        """
+        Create/update CommunitySummary nodes with chunked embedding computation.
+        
+        Uses sparse-to-dense approach: splits large question sets into overlapping chunks,
+        embeds each chunk separately, stores all chunk embeddings for MaxSim retrieval.
+        
+        Returns:
+            Number of summaries created/updated
+        """
+        if not embedder:
+            logger.warning("No embedder available for community summaries")
+            return 0
+        
+        from langchain_text_splitters import RecursiveCharacterTextSplitter
+        
+        # Configuration for chunking
+        MAX_TOKENS = 450  # Safe limit below 512 for most embedding models
+        CHUNK_OVERLAP = 100  # Token overlap between chunks
+        
+        # Estimate ~4 characters per token
+        max_chars = MAX_TOKENS * 4
+        overlap_chars = CHUNK_OVERLAP * 4
+        
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=max_chars,
+            chunk_overlap=overlap_chars,
+            separators=["\n\n", "\n", ". ", "? ", " ", ""],
+            length_function=len
+        )
+        
+        created = 0
+        
+        for stable_id, questions in community_questions.items():
+            if not questions:
+                continue
+                
+            # Concatenate questions with numbering for context
+            content = " ".join([f"Q{i+1}. {q}" for i, q in enumerate(questions)])
+            
+            # Split into chunks if too long
+            content_chunks = splitter.split_text(content) if len(content) > max_chars else [content]
+            
+            # Embed all chunks in parallel
+            try:
+                embedding_tasks = [embedder.aembed_query(chunk) for chunk in content_chunks]
+                chunk_embeddings = await asyncio.gather(*embedding_tasks, return_exceptions=True)
+                
+                # Filter out failed embeddings
+                valid_embeddings = []
+                valid_chunks = []
+                for chunk, emb in zip(content_chunks, chunk_embeddings):
+                    if isinstance(emb, Exception):
+                        logger.warning(f"Embedding failed for community {stable_id} chunk: {emb}")
+                        continue
+                    valid_embeddings.append(emb)
+                    valid_chunks.append(chunk)
+                
+                if not valid_embeddings:
+                    logger.warning(f"No valid embeddings for community {stable_id}, skipping")
+                    continue
+                
+                member_ids = community_members.get(stable_id, [])
+                
+                # Store with chunked embeddings
+                success = await self.neo4j_handler.upsert_community_summary(
+                    community_id=stable_id,
+                    content=content,  # Full content for reference
+                    embedding=valid_embeddings[0],  # Primary embedding (first chunk)
+                    member_chunk_ids=member_ids,
+                    question_chunks=valid_chunks,
+                    embedding_chunks=valid_embeddings
+                )
+                if success:
+                    created += 1
+                    if len(valid_chunks) > 1:
+                        logger.debug(f"Community {stable_id}: split into {len(valid_chunks)} embedding chunks")
+                        
+            except Exception as e:
+                logger.error(f"Error processing community {stable_id}: {e}")
+                continue
+        
+        return created
+
+
 class ACSAutomata:
     """
     ACS (Adaptive Computing System) Automata
     Computes network science metrics using NetworkX (in-memory) for reliability and simplicity.
+    Optionally runs community detection when community_high_graph is enabled.
     """
     
-    def __init__(self, neo4j_handler: Neo4jHandler):
+    def __init__(self, neo4j_handler: Neo4jHandler, community_config: CommunityHighGraphConfig = None, embedder = None):
         self.neo4j_handler = neo4j_handler
         self.metrics_cache = {}
         self.last_update_time = time.time()
+        self.community_config = community_config
+        self.embedder = embedder
+        
+        # Initialize community detector if enabled
+        self.community_detector: Optional[CommunityDetector] = None
+        if community_config and community_config.community_creator:
+            self.community_detector = CommunityDetector(neo4j_handler, community_config, embedder)
+            logger.info("Community detection enabled in ACS Automata")
+    
+    def set_embedder(self, embedder):
+        """Set or update the embedder used for community summaries"""
+        self.embedder = embedder
+        if self.community_detector:
+            self.community_detector.embedder = embedder
+    
+    async def run_community_detection_if_due(self, batch_idx: int) -> Optional[Dict[str, Any]]:
+        """
+        Run community detection if the batch index indicates it's due.
+        
+        Args:
+            batch_idx: Current batch index (0-indexed)
+            
+        Returns:
+            Community stats dict if run, None otherwise
+        """
+        if not self.community_detector or not self.community_config:
+            return None
+        
+        frequency = self.community_config.frequency_incremental_leiden
+        # Run on batches: frequency-1, 2*frequency-1, 3*frequency-1, etc. (every N batches)
+        # batch_idx is 0-indexed, so we check (batch_idx + 1) % frequency == 0
+        if (batch_idx + 1) % frequency == 0:
+            logger.info(f"Running scheduled community detection at batch {batch_idx + 1}")
+            return await self.community_detector.update_communities(self.embedder)
+        
+        return None
         
     async def update_metrics(self) -> Dict[str, Any]:
         """Update and compute network science metrics using NetworkX"""

@@ -243,10 +243,11 @@ class OnlineRetriever:
 class OfflineRetriever:
     """Handles offline retrieval against a specific graph UUID"""
 
-    def __init__(self, config: RetrievalConfig, neo4j_config, kg_config):
+    def __init__(self, config: RetrievalConfig, neo4j_config, kg_config, community_config=None):
         self.config = config
         self.neo4j_config = neo4j_config
         self.kg_config = kg_config
+        self.community_config = community_config
         self.neo4j_handler = None
 
     async def initialize_for_graph(self, graph_uuid: str):
@@ -336,7 +337,13 @@ class OfflineRetriever:
 
     async def _perform_retrieval(self, query: str, true_chunks: List[int] = None) -> tuple[str, bool]:
         """Perform a retrieval query using the hybrid search logic, with optional true_chunks tracking"""
-        hybrid = HybridRetriever(self.config, self.neo4j_handler, schedule_path=None, realtime_output=False)
+        hybrid = HybridRetriever(
+            self.config, 
+            self.neo4j_handler, 
+            schedule_path=None, 
+            realtime_output=False,
+            community_config=self.community_config
+        )
         return await hybrid._perform_hybrid_retrieval(query, true_chunks)
 
     async def _rerank_results(self, query: str, nodes: List[Dict]) -> List[Dict]:

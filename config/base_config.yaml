@@ -88,5 +88,16 @@ benchmark_llm:
   temperature: 0.2
   top_p: 0.9
   max_tokens: 2048
+
+# Community-based high-level graph configuration
+# When enabled, creates question nodes per chunk and detects communities using Leiden
+community_high_graph:
+  community_creator: true  # Enable community-aware KG building with question generation
+  community_retriever: true  # Enable community-based retrieval (similarity on CommunitySummary nodes)
+  question_per_chunk: 2  # Number of questions to generate per chunk
+  frequency_incremental_leiden: 5  # Run Leiden community detection every N batches
+  community_resolution: 1.0  # Gamma parameter for Leiden algorithm resolution
+  debug_print_community: 3  # Number of random community descriptions to log at DEBUG level
+
 # Save per-batch network metrics to a file while the run progresses
 saving_batch_metrics: true

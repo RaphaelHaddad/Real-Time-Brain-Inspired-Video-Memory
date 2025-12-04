@@ -60,7 +60,7 @@ async def run_offline_retrieval(config_path: str, graph_uuid: str, query: str, g
     logger.info(f"Query: {query}")
     logger.info(f"Ground truth: {groundtruth}")
 
-    retriever = OfflineRetriever(config.retrieval, config.neo4j, config.kg)
+    retriever = OfflineRetriever(config.retrieval, config.neo4j, config.kg, config.community_high_graph)
     result = await retriever.retrieve(query, graph_uuid, groundtruth, true_chunks)
 
     logger.info(f"Retrieval result: {result}")
@@ -77,7 +77,7 @@ async def run_batch_offline_retrieval(config_path: str, graph_uuid: str, input_f
     logger.info(f"Input file: {input_file}")
     logger.info(f"Output file: {output_file}")
 
-    retriever = OfflineRetriever(config.retrieval, config.neo4j, config.kg)
+    retriever = OfflineRetriever(config.retrieval, config.neo4j, config.kg, config.community_high_graph)
     results = await retriever.batch_retrieve_from_file(input_file, graph_uuid)
 
     # Save results to output file
