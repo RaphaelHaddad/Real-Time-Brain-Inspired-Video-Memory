@@ -126,6 +126,8 @@ class Graph:
     def prune_graph(self, similarity_threshold=0.8):
         processed_pairs = set()
         new_relationships = []
+        pruned_count = 0
+        kept_count = 0
         
         for rel in self.relationships:
             node1 = rel['from_node']
@@ -142,6 +144,7 @@ class Graph:
             
             if len(relations) <= 1:
                 new_relationships.extend(relations)
+                kept_count += len(relations)
                 continue
             
             node1_to_node2 = [r for r in relations if r['from_node'] == node1 and r['to_node'] == node2]
@@ -153,16 +156,17 @@ class Graph:
                 
                 if len(direction_relations) == 1:
                     new_relationships.append(direction_relations[0])
+                    kept_count += 1
                 else:
                     relation_sentences = []
                     for r in direction_relations:
                         rel_type = r['type'].replace("_", " ")
                         sentence = f"{r['from_node']} {rel_type} {r['to_node']}"
                         relation_sentences.append(sentence)
+                        
                     should_prune, representative_idx, outlier_indices = self._are_same_context(
                         relation_sentences, similarity_threshold
                     )
-                    print("\nSHOULD PRUNE: \n", should_prune )
                     
                     if should_prune:
                         # Keep the most representative relation from similar cluster
@@ -172,12 +176,21 @@ class Graph:
                         for outlier_idx in outlier_indices:
                             new_relationships.append(direction_relations[outlier_idx])
                         
-                        kept_count = 1 + len(outlier_indices)
-                        print(f"Pruned {len(direction_relations)} relations to {kept_count} between {direction_relations[0]['from_node']} → {direction_relations[0]['to_node']} (kept {len(outlier_indices)} outliers)")
+                        kept = 1 + len(outlier_indices)
+                        removed = len(direction_relations) - kept
+                        pruned_count += removed
+                        kept_count += kept
+                        
+                        print(f"Pruned {len(direction_relations)} → {kept} relations between "
+                              f"{direction_relations[0]['from_node']} → {direction_relations[0]['to_node']} "
+                              f"(kept representative + {len(outlier_indices)} outliers)")
                     else:
                         new_relationships.extend(direction_relations)
+                        kept_count += len(direction_relations)
+    
+        print(f"\nPruning summary: {self.original_rel_count} → {len(new_relationships)} relationships")
+        print(f"Removed {pruned_count} redundant edges, kept {kept_count} edges")
         
-
         return new_relationships
         
 

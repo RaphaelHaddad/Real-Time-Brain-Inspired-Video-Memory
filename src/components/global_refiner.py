@@ -56,7 +56,8 @@ class GlobalRefiner:
         self.chain = self.llm.with_structured_output(CompactTripletOutput)
         self.prompt_template = get_llm_injector_prompt_template()
 
-        self.instruction_chain = self.llm.with_structured_output(InstructionRefinementOutput)
+        # Changed: Use raw LLM instead of structured_output to handle Markdown wrapping manually
+        self.instruction_chain = self.llm 
         self.instruction_prompt_template = get_llm_injector_instruction_prompt_template()
 
         logger.info(
@@ -319,7 +320,11 @@ class GlobalRefiner:
             # Call structured LLM
             logger.debug("Starting instruction-based refinement LLM call...")
             llm_start = time.perf_counter()
-            output = await self.instruction_chain.ainvoke([("user", prompt)])
+            
+            # Changed: Handle raw response to strip Markdown if present
+            response = await self.instruction_chain.ainvoke([("user", prompt)])
+            output = response.content
+            
             llm_time = time.perf_counter() - llm_start
             logger.debug(f"LLM call completed in {llm_time:.2f}s")
 

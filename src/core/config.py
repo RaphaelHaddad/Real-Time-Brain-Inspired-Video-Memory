@@ -68,6 +68,9 @@ class Neo4jConfig(BaseModel):
     database: str = "neo4j"
 
 class RetrievalConfig(BaseModel):
+    endpoint: str
+    api_key: str
+    model_name: str
     use_reranker: bool = False
     reranker_endpoint: Optional[str] = None
     reranker_api_key: Optional[str] = None

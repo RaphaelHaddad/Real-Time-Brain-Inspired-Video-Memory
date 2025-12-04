@@ -1,22 +1,36 @@
 from ..core.logger import get_logger
 from ..components.neo4j_handler import Neo4jHandler
-from typing import Dict, Any
+from typing import Dict, Any, List, Tuple, Set
 import time
 import networkx as nx
 import math
+from collections import Counter
+import numpy as np
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
 
 logger = get_logger(__name__)
 
 class ACSAutomata:
     """
     ACS (Adaptive Computing System) Automata
-    Computes network science metrics using NetworkX (in-memory) for reliability and simplicity.
+    Computes network science metrics using NetworkX (in-memory).
+    Includes semantic pruning of redundant edges using embeddings to optimize graph structure.
     """
     
     def __init__(self, neo4j_handler: Neo4jHandler):
         self.neo4j_handler = neo4j_handler
         self.metrics_cache = {}
         self.last_update_time = time.time()
+        
+        # Initialize embedding model for semantic pruning
+        try:
+            logger.info("Loading embedding model for graph pruning (Qwen/Qwen3-Embedding-0.6B)...")
+            self.embedding_model = SentenceTransformer('Qwen/Qwen3-Embedding-0.6B')
+            logger.info("Embedding model loaded successfully.")
+        except Exception as e:
+            logger.error(f"Failed to load embedding model: {e}")
+            self.embedding_model = None
         
     async def update_metrics(self) -> Dict[str, Any]:
         """Update and compute network science metrics using NetworkX"""
@@ -25,8 +39,18 @@ class ACSAutomata:
         try:
             logger.info("Computing network science metrics using NetworkX...")
             
-            # Build NetworkX graph from Neo4j
-            G = await self._build_networkx_graph()
+            # Build NetworkX MultiDiGraph (to capture all parallel edges for pruning)
+            G_multi = await self._build_networkx_graph()
+            
+            # Prune redundant edges if model is available
+            if self.embedding_model and G_multi.number_of_edges() > 0:
+                G_pruned = self._prune_redundant_edges(G_multi)
+            else:
+                G_pruned = G_multi
+
+            # Convert to simple DiGraph for standard metrics 
+            # (This collapses any remaining parallel edges to single edges, which is standard for these metrics)
+            G = nx.DiGraph(G_pruned)
             
             # Basic metrics
             node_count = G.number_of_nodes()
@@ -133,10 +157,18 @@ class ACSAutomata:
                 avg_path_length = None
             
             # Degree Centrality (shows entity importance after merging)
+            top_central_nodes = []
             try:
                 degree_centrality = nx.degree_centrality(G)
                 avg_degree_centrality = sum(degree_centrality.values()) / len(degree_centrality)
                 max_degree_centrality = max(degree_centrality.values()) if degree_centrality else 0.0
+                
+                # Capture top nodes for LLM context
+                sorted_centrality = sorted(degree_centrality.items(), key=lambda x: x[1], reverse=True)[:10]
+                top_central_nodes = [
+                    {"name": G.nodes[n_id].get("name", str(n_id)), "score": score} 
+                    for n_id, score in sorted_centrality
+                ]
             except Exception:
                 avg_degree_centrality = 0.0
                 max_degree_centrality = 0.0
@@ -235,6 +267,30 @@ class ACSAutomata:
             # Label Entropy
             label_entropy = await self._compute_label_entropy()
 
+            # --- Semantic Metrics ---
+            # Relation type distribution
+            edge_types = [d.get("type") for _, _, d in G.edges(data=True) if "type" in d]
+            relation_counts = Counter(edge_types)
+            top_relations = [{"type": k, "count": v} for k, v in relation_counts.most_common(10)]
+            
+            # Entity label distribution
+            node_labels = []
+            for _, d in G.nodes(data=True):
+                if "labels" in d:
+                    node_labels.extend(d["labels"])
+            label_counts = Counter(node_labels)
+            top_entity_types = [{"label": k, "count": v} for k, v in label_counts.most_common(10)]
+
+            # --- Growth Indicators ---
+            hub_concentration = 0.0
+            if node_count > 0:
+                degrees = [d for _, d in G.degree()]
+                top_10_percent = max(1, int(0.1 * node_count))
+                top_degrees = sorted(degrees, reverse=True)[:top_10_percent]
+                total_degree_sum = sum(degrees)
+                if total_degree_sum > 0:
+                    hub_concentration = sum(top_degrees) / total_degree_sum
+
             metrics = {
                 "node_count": node_count,
                 "relationship_count": rel_count,
@@ -257,6 +313,10 @@ class ACSAutomata:
                 "louvain_communities": louvain_communities,
                 "louvain_modularity": round(louvain_modularity, 4) if louvain_modularity is not None else None,
                 "label_entropy": label_entropy,
+                "top_central_nodes": top_central_nodes,
+                "top_relations": top_relations,
+                "top_entity_types": top_entity_types,
+                "hub_concentration": round(hub_concentration, 4),
                 "computational_time": time.perf_counter() - start_time
             }
 
@@ -270,35 +330,142 @@ class ACSAutomata:
             logger.error(f"Error computing network metrics: {str(e)}")
             return {"error": str(e), "computational_time": time.perf_counter() - start_time}
 
-    async def _build_networkx_graph(self) -> nx.DiGraph:
-        """Build a NetworkX graph from the Neo4j subgraph for the current run"""
-        G = nx.DiGraph()
+    async def _build_networkx_graph(self) -> nx.MultiDiGraph:
+        """Build a NetworkX MultiDiGraph from the Neo4j subgraph to capture all edges"""
+        G = nx.MultiDiGraph()
         try:
             async with self.neo4j_handler.driver.session() as session:
-                # Fetch nodes filtered by graph_uuid
+                # Fetch nodes filtered by graph_uuid with name and labels
                 node_query = """
                 MATCH (n:GraphNode) 
                 WHERE n.graph_uuid = $graph_uuid 
-                RETURN elementId(n) as id
+                RETURN elementId(n) as id, n.name as name, labels(n) as labels
                 """
                 result_nodes = await session.run(node_query, graph_uuid=self.neo4j_handler.run_uuid)
-                nodes = [record["id"] async for record in result_nodes]
-                G.add_nodes_from(nodes)
                 
-                # Fetch edges where both source and target are in the graph_uuid
+                nodes_data = []
+                async for record in result_nodes:
+                    nodes_data.append((record["id"], {"name": record["name"], "labels": record["labels"]}))
+                G.add_nodes_from(nodes_data)
+                
+                # Fetch edges where both source and target are in the graph_uuid with type
                 edge_query = """
                 MATCH (n:GraphNode)-[r]->(m:GraphNode)
                 WHERE n.graph_uuid = $graph_uuid AND m.graph_uuid = $graph_uuid
-                RETURN elementId(n) as source, elementId(m) as target
+                RETURN elementId(n) as source, elementId(m) as target, type(r) as type
                 """
                 result_edges = await session.run(edge_query, graph_uuid=self.neo4j_handler.run_uuid)
-                edges = [(record["source"], record["target"]) async for record in result_edges]
-                G.add_edges_from(edges)
+                
+                edges_data = []
+                async for record in result_edges:
+                    edges_data.append((record["source"], record["target"], {"type": record["type"]}))
+                G.add_edges_from(edges_data)
                 
             return G
         except Exception as e:
             logger.error(f"Error building NetworkX graph: {str(e)}")
-            return nx.DiGraph()
+            return nx.MultiDiGraph()
+
+    def _are_same_context(self, relation_sentences: List[str], threshold: float = 0.8) -> Tuple[bool, int, List[int]]:
+        """
+        Determine representative relation and outliers using embedding similarity.
+        Adapted from prune.py.
+        """
+        if len(relation_sentences) <= 1:
+            return False, None, list(range(len(relation_sentences)))
+
+        # 1. Encode embeddings
+        embeddings = self.embedding_model.encode(relation_sentences)
+        similarity_matrix = cosine_similarity(embeddings)
+
+        # 2. Build graph based on similarity threshold
+        G_sim = nx.Graph()
+        G_sim.add_nodes_from(range(len(relation_sentences)))
+
+        for i in range(len(relation_sentences)):
+            for j in range(i + 1, len(relation_sentences)):
+                if similarity_matrix[i][j] >= threshold:
+                    G_sim.add_edge(i, j)
+
+        # 3. Extract clusters (connected components)
+        clusters = [list(c) for c in nx.connected_components(G_sim)]
+        
+        # If every sentence is isolated -> no pruning
+        if all(len(c) == 1 for c in clusters):
+            return False, None, list(range(len(relation_sentences)))
+
+        # 4. Identify the main cluster (largest)
+        clusters_sorted = sorted(clusters, key=len, reverse=True)
+        main_cluster = clusters_sorted[0]
+
+        # 5. Determine representative inside the main cluster
+        main_embeddings = embeddings[main_cluster]
+        centroid = np.mean(main_embeddings, axis=0)
+        sims_to_centroid = cosine_similarity([centroid], main_embeddings)[0]
+        rep_local_idx = np.argmax(sims_to_centroid)
+        representative_idx = main_cluster[rep_local_idx]
+
+        # 6. Remaining clusters = outliers
+        outlier_indices = []
+        for cluster in clusters_sorted[1:]:
+            outlier_indices.extend(cluster)
+
+        should_prune = len(main_cluster) > 1
+        return should_prune, representative_idx, outlier_indices
+
+    def _prune_redundant_edges(self, G: nx.MultiDiGraph) -> nx.MultiDiGraph:
+        """
+        Prune redundant edges between same nodes based on semantic similarity.
+        Modifies the graph in-place or returns a copy.
+        """
+        logger.info("Starting semantic pruning of edges...")
+        edges_to_remove = []
+        
+        # Identify unique node pairs that have edges
+        # G.edges(keys=True) yields (u, v, key)
+        # We need to group edges by (u, v)
+        edge_groups = {}
+        for u, v, key, data in G.edges(keys=True, data=True):
+            if (u, v) not in edge_groups:
+                edge_groups[(u, v)] = []
+            edge_groups[(u, v)].append((key, data))
+            
+        pruned_count = 0
+        
+        for (u, v), edges in edge_groups.items():
+            if len(edges) <= 1:
+                continue
+                
+            # Prepare sentences for embedding
+            # Format: "NodeName RelationType NodeName"
+            u_name = G.nodes[u].get('name', str(u))
+            v_name = G.nodes[v].get('name', str(v))
+            
+            relation_sentences = []
+            for _, data in edges:
+                rel_type = data.get('type', '').replace("_", " ")
+                sentence = f"{u_name} {rel_type} {v_name}"
+                relation_sentences.append(sentence)
+            
+            should_prune, representative_idx, outlier_indices = self._are_same_context(relation_sentences)
+            
+            if should_prune:
+                # Indices to keep: representative + outliers
+                indices_to_keep = {representative_idx} | set(outlier_indices)
+                
+                # Identify keys to remove
+                for idx, (key, _) in enumerate(edges):
+                    if idx not in indices_to_keep:
+                        edges_to_remove.append((u, v, key))
+                        pruned_count += 1
+                        
+        if edges_to_remove:
+            G.remove_edges_from(edges_to_remove)
+            logger.info(f"Pruned {pruned_count} redundant edges.")
+        else:
+            logger.info("No redundant edges found to prune.")
+            
+        return G
 
     async def _compute_label_entropy(self) -> float:
         """Compute Shannon entropy of node labels"""
@@ -322,3 +489,57 @@ class ACSAutomata:
         except Exception as e:
             logger.error(f"Failed to compute label entropy: {str(e)}")
             return 0.0
+
+    def get_llm_context(self) -> str:
+        """
+        Generate context string for LLM based on computed metrics.
+        Provides structural insights, existing vocabulary, and recommendations.
+        """
+        if not self.metrics_cache:
+            return "Graph context not yet available."
+            
+        if "error" in self.metrics_cache:
+            return f"Graph context unavailable due to error: {self.metrics_cache['error']}"
+            
+        m = self.metrics_cache
+        
+        # Generate Recommendations
+        recommendations = []
+        if m.get("density", 0) > 0.1:
+            recommendations.append("Graph is becoming dense. Focus on identifying distinct relationships to avoid redundancy.")
+        elif m.get("density", 0) < 0.01:
+            recommendations.append("Graph is sparse. Look for implicit connections between existing entities.")
+            
+        if m.get("weakly_connected_components", 0) > 1:
+            recommendations.append(f"Graph has {m['weakly_connected_components']} disconnected components. Consider linking isolated clusters.")
+
+        if m.get("hub_concentration", 0) > 0.4:
+             recommendations.append("High hub concentration detected. Ensure central nodes are not becoming 'super-nodes' with irrelevant connections.")
+
+        # Helper to safely get name string
+        def get_safe_name(node_dict):
+            name = node_dict.get('name')
+            return str(name) if name else ""
+
+        # Format Prompt
+        prompt = f"""
+        ## Current Knowledge Graph Context
+        **Graph Size:** {m.get('node_count', 0)} nodes, {m.get('relationship_count', 0)} relationships
+        **Density:** {m.get('density', 0)}
+        **Connectivity:** {m.get('weakly_connected_components', 0)} components
+        
+        **Key Entities (Central Nodes):**
+        {', '.join([get_safe_name(n) for n in m.get('top_central_nodes', [])]) if m.get('top_central_nodes') else 'None'}
+        
+        **Existing Relationship Types:**
+        {', '.join([f"{r['type']} ({r['count']})" for r in m.get('top_relations', [])]) if m.get('top_relations') else 'None'}
+        
+        **Existing Entity Types:**
+        {', '.join([f"{l['label']} ({l['count']})" for l in m.get('top_entity_types', [])]) if m.get('top_entity_types') else 'None'}
+        
+        **Recommendations:**
+        {chr(10).join(f"- {rec}" for rec in recommendations) if recommendations else "- Maintain current graph quality."}
+        
+        **Instruction:** Check the list of Key Entities above. If a new entity is a synonym or refers to the same object, use the existing name.
+        """
+        return prompt.strip()

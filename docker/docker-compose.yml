@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   neo4j:
     image: neo4j:5-community  # Or pin to exact version, e.g., neo4j:5.24.0
@@ -16,7 +14,7 @@ services:
       - neo4j_data:/data
       - neo4j_logs:/logs
       - neo4j_import:/import
-      - ./plugins/apoc-5.26.16-core.jar:/plugins/apoc-5.26.16-core.jar  # Mount only APOC JAR
+      - ./plugins:/plugins
       - ./neo4j_init.cypher:/docker-entrypoint-initdb.d/init.cypher  # Use for APOC init if needed
     healthcheck:
       test: ["CMD-SHELL", "cypher-shell -u neo4j -p password 'RETURN apoc.version() AS version;' | grep -q 'apoc' || exit 1"]  # UPDATED: Tests APOC availability

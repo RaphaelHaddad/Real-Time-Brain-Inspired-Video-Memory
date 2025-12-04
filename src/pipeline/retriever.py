@@ -1,19 +1,19 @@
 import json
 import time
-import httpx
-from pathlib import Path
 from typing import List, Dict, Any, Optional
-from ..core.config import RetrievalConfig
-from ..components.neo4j_handler import Neo4jHandler
+from pathlib import Path
+import httpx
 from ..core.logger import get_logger
-from .retriever_hybrid import HybridRetriever
+from ..components.neo4j_handler import Neo4jHandler
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate  # ← Changed from langchain.prompts
 
 logger = get_logger(__name__)
 
 class OnlineRetriever:
     """Handles online retrieval during pipeline processing"""
 
-    def __init__(self, config: RetrievalConfig, neo4j_handler: Neo4jHandler, schedule_path: str):
+    def __init__(self, config, neo4j_handler: Neo4jHandler, schedule_path: str):
         self.config = config
         self.neo4j_handler = neo4j_handler
         self.schedule_path = schedule_path
@@ -230,11 +230,12 @@ class OnlineRetriever:
         """Close the online retriever and save execution results"""
         # Save retrieval results to a file
         output_path = f"outputs/retrieval_results_{self.neo4j_handler.run_uuid}.json"
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         with open(output_path, 'w') as f:
             json.dump({
                 "run_uuid": self.neo4j_handler.run_uuid,
                 "executed_queries": self.executed_queries,
-                "config": self.config.dict()
+                "config": self.config.dict() if hasattr(self.config, 'dict') else vars(self.config)
             }, f, indent=2)
 
         logger.info(f"Online retrieval results saved to: {output_path}")
@@ -243,127 +244,234 @@ class OnlineRetriever:
 class OfflineRetriever:
     """Handles offline retrieval against a specific graph UUID"""
 
-    def __init__(self, config: RetrievalConfig, neo4j_config, kg_config):
+    def __init__(self, config, neo4j_config, kg_config):
         self.config = config
         self.neo4j_config = neo4j_config
         self.kg_config = kg_config
         self.neo4j_handler = None
+
+        # Initialize LLM for answer generation
+        self.answer_llm = ChatOpenAI(
+            base_url=config.endpoint,
+            api_key=config.api_key,
+            model=config.model_name,
+            temperature=0.2,
+        )
+        
+        # Answer generation prompt
+        self.answer_prompt = ChatPromptTemplate.from_messages([
+            ("system", """You are a helpful assistant that answers questions based on provided context.
+
+Rules:
+1. Answer the question directly and concisely
+2. Only use information from the provided context chunks
+3. If the context doesn't contain enough information, say "I cannot answer based on the available information"
+4. Be specific - include details like colors, numbers, names when asked
+5. Keep answers brief (1-3 sentences max)"""),
+            ("user", """Question: {query}
+
+Context from video:
+{context}
+
+Answer:""")
+        ])
 
     async def initialize_for_graph(self, graph_uuid: str):
         """Initialize the retriever for a specific graph"""
         from ..components.neo4j_handler import Neo4jHandler
         self.neo4j_handler = Neo4jHandler(self.neo4j_config, self.kg_config, graph_uuid)
 
-    async def retrieve(self, query: str, graph_uuid: str, groundtruth: str = "") -> Dict[str, Any]:
-        """Perform offline retrieval against the specified graph"""
-        await self.initialize_for_graph(graph_uuid)
-
-        start_time = time.perf_counter()
+    async def retrieve(self, query: str, graph_uuid: str, groundtruth: str = "", verbose: bool = False) -> Dict[str, Any]:
+        """
+        Retrieve answer for a query from the knowledge graph.
+        Now generates a direct answer from retrieved chunks.
+        """
+        start_time = time.time()
+        
         try:
-            # Perform the retrieval
-            retrieval_result = await self._perform_retrieval(query)
-            retrieval_time = time.perf_counter() - start_time
-
+            # Step 1: Hybrid search for relevant chunks
+            chunks = await self._hybrid_search(query, graph_uuid)
+            
+            # Step 2: Get related entities (optional context)
+            entities = await self._get_related_entities(query, graph_uuid)
+            
+            # Step 3: Generate answer from chunks using LLM
+            answer = await self._generate_answer(query, chunks)
+            
+            retrieval_time = time.time() - start_time
+            
             result = {
                 "query": query,
                 "groundtruth": groundtruth,
-                "retrieval": retrieval_result,
+                "answer": answer,  # ← Direct answer
                 "graph_uuid": graph_uuid,
                 "retrieval_time": retrieval_time,
-                "verbose": self.config.verbose
             }
-
-            if self.config.verbose:
-                logger.info(f"Offline retrieval details:")
-                logger.info(f"  Query: {query}")
-                logger.info(f"  Ground truth: {groundtruth}")
-                logger.info(f"  Graph UUID: {graph_uuid}")
-                logger.info(f"  Time: {retrieval_time:.2f}s")
-                logger.info(f"  Retrieval result: {retrieval_result}")
-
+            
+            # Add verbose info if requested
+            if verbose:
+                result["debug_info"] = {
+                    "chunks": [
+                        {"text": c["text"][:200] + "...", "score": c["score"]}
+                        for c in chunks[:5]
+                    ],
+                    "entities": entities[:10],
+                    "num_chunks_retrieved": len(chunks),
+                    "num_entities_found": len(entities)
+                }
+            
             return result
-
+            
         except Exception as e:
-            logger.error(f"Error in offline retrieval: {str(e)}")
+            logger.error(f"Retrieval failed for query '{query}': {e}")
             return {
                 "query": query,
                 "groundtruth": groundtruth,
+                "answer": f"Error: {str(e)}",
                 "graph_uuid": graph_uuid,
-                "retrieval": f"Error: {str(e)}",
-                "retrieval_time": time.perf_counter() - start_time
+                "retrieval_time": time.time() - start_time,
             }
+    
+    async def _generate_answer(self, query: str, chunks: List[Dict]) -> str:
+        """Generate a direct answer from retrieved chunks using LLM"""
+        if not chunks:
+            print(f"\n{'!'*50}\nNO CHUNKS FOUND FOR QUERY: {query}\n{'!'*50}\n")
+            return "I cannot answer based on the available information."
+        
+        # Format chunks into context
+        context = "\n\n".join([
+            f"[Chunk {i+1}] {chunk['text']}"
+            for i, chunk in enumerate(chunks[:5])  # Use top 5 chunks
+        ])
+        
+        # VISUAL DEBUGGING
+        print(f"\n{'='*50}\nQUERY: {query}\n{'-'*50}\nCONTEXT:\n{context}\n{'='*50}\n")
+        
+        # Generate answer using LLM
+        try:
+            messages = self.answer_prompt.format_messages(
+                query=query,
+                context=context
+            )
+            response = await self.answer_llm.ainvoke(messages)
+            answer = response.content.strip()
+            
+            return answer
+            
+        except Exception as e:
+            logger.error(f"Answer generation failed: {e}")
+            # Fallback: return first chunk as answer
+            return chunks[0]["text"][:300] + "..."
+    
+    async def _hybrid_search(self, query: str, graph_uuid: str, top_k: int = 5) -> List[Dict]:
+        """Perform hybrid search (vector + keyword) on chunks"""
+        neo4j_handler = Neo4jHandler(self.neo4j_config, self.kg_config, graph_uuid)
+        
+        try:
+            vector_results = await neo4j_handler.search_chunks_vector(
+                query, 
+                top_k=top_k * 2,
+                endpoint=self.config.endpoint,
+                api_key=self.config.api_key
+            )
+            
+            # Keyword search
+            keyword_results = await neo4j_handler.search_chunks_keyword(
+                query,
+                top_k=top_k * 2
+            )
+            
+            # Merge and deduplicate
+            chunks_dict = {}
+            
+            # Add vector results
+            for chunk in vector_results:
+                chunk_id = chunk.get("chunk_id") or chunk.get("id")
+                chunks_dict[chunk_id] = {
+                    "chunk_id": chunk_id,
+                    "text": chunk["text"],
+                    "score": chunk.get("score", 0),
+                    "time": chunk.get("time", ""),
+                    "source": "vector"
+                }
+            
+            # Boost scores for keyword matches
+            for chunk in keyword_results:
+                chunk_id = chunk.get("chunk_id") or chunk.get("id")
+                if chunk_id in chunks_dict:
+                    # Keyword match found in vector results - boost score
+                    chunks_dict[chunk_id]["score"] *= 1.2
+                    chunks_dict[chunk_id]["source"] = "hybrid"
+                else:
+                    chunks_dict[chunk_id] = {
+                        "chunk_id": chunk_id,
+                        "text": chunk["text"],
+                        "score": chunk.get("score", 0) * 0.8,  # Lower base score
+                        "time": chunk.get("time", ""),
+                        "source": "keyword"
+                    }
+            
+            # Sort by score and return top k
+            sorted_chunks = sorted(
+                chunks_dict.values(),
+                key=lambda x: x["score"],
+                reverse=True
+            )
+            
+            return sorted_chunks[:top_k]
+            
         finally:
-            if self.neo4j_handler:
-                await self.neo4j_handler.close()
-
-    async def batch_retrieve_from_file(self, input_file_path: str, graph_uuid: str) -> List[Dict[str, Any]]:
-        """Perform batch offline retrieval from a JSON file with consistent format"""
+            await neo4j_handler.close()
+    
+    async def _get_related_entities(self, query: str, graph_uuid: str, limit: int = 20) -> List[str]:
+        """Get entity names related to the query"""
+        neo4j_handler = Neo4jHandler(self.neo4j_config, self.kg_config, graph_uuid)
+        
         try:
-            with open(input_file_path, 'r', encoding='utf-8') as f:
-                queries_data = json.load(f)
+            # Simple keyword matching on entity names
+            query_keywords = query.lower().split()
             
-            results = []
-            for item in queries_data:
-                query = item.get('query', '')
-                groundtruth = item.get('groundtruth', '')
-                
-                result = await self.retrieve(query, graph_uuid, groundtruth)
-                results.append(result)
+            cypher = """
+            MATCH (e:Entity)
+            WHERE e.run_uuid = $run_uuid
+            AND any(keyword IN $keywords WHERE toLower(e.name) CONTAINS keyword)
+            RETURN e.name as name
+            LIMIT $limit
+            """
             
-            return results
-        except Exception as e:
-            logger.error(f"Error in batch offline retrieval: {str(e)}")
-            return []
-
-    async def _perform_retrieval(self, query: str) -> str:
-        """Perform a retrieval query using the hybrid search logic"""
-        hybrid = HybridRetriever(self.config, self.neo4j_handler, schedule_path=None, realtime_output=False)
-        return await hybrid._perform_hybrid_retrieval(query)
-
-    async def _rerank_results(self, query: str, nodes: List[Dict]) -> List[Dict]:
-        """Apply reranking to the retrieval results if a reranker is configured"""
-        try:
-            if not nodes:
-                return nodes
-
-            # Prepare documents for reranking
-            documents = [node["name"] for node in nodes]
-
-            # Prepare the request to the reranker API
-            rerank_payload = {
-                "query": query,
-                "documents": documents,
-                "top_k": len(documents)  # Rerank all documents
-            }
-
-            # Add authentication if reranker API key is provided
-            headers = {"Content-Type": "application/json"}
-            if self.config.reranker_api_key:
-                headers["Authorization"] = f"Bearer {self.config.reranker_api_key}"
-
-            # Make the API call to the reranker
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    self.config.reranker_endpoint,
-                    json=rerank_payload,
-                    headers=headers
+            async with neo4j_handler.driver.session() as session:
+                result = await session.run(
+                    cypher,
+                    {
+                        "run_uuid": graph_uuid,
+                        "keywords": query_keywords,
+                        "limit": limit
+                    }
                 )
-                response.raise_for_status()
+                records = await result.values()
+                return [record[0] for record in records if record[0]]
                 
-                rerank_result = response.json()
-
-            # Reorder nodes based on rerank result
-            # The reranker should return indices or scores for reranking
-            if "results" in rerank_result and isinstance(rerank_result["results"], list):
-                # Assuming rerank_result["results"] is a list of {index, score} objects
-                reranked_indices = [item["index"] for item in rerank_result["results"]]
-                reranked_nodes = [nodes[i] for i in reranked_indices if i < len(nodes)]
-                return reranked_nodes
-            else:
-                logger.warning("Reranker response format not as expected, returning original order")
-                return nodes
-
         except Exception as e:
-            logger.error(f"Error during reranking: {str(e)}")
-            logger.info("Returning original results without reranking")
-            return nodes
+            logger.warning(f"Entity retrieval failed: {e}")
+            return []
+        finally:
+            await neo4j_handler.close()
+    
+    async def batch_retrieve_from_file(self, input_file: str, graph_uuid: str, verbose: bool = False) -> List[Dict]:
+        """Process multiple queries from a JSON file"""
+        logger.info(f"Loading queries from: {input_file}")
+        
+        with open(input_file, 'r', encoding='utf-8') as f:
+            queries = json.load(f)
+        
+        results = []
+        for i, query_item in enumerate(queries, 1):
+            query = query_item["query"]
+            groundtruth = query_item.get("groundtruth", "")
+            
+            logger.info(f"Processing query {i}/{len(queries)}: {query[:50]}...")
+            
+            result = await self.retrieve(query, graph_uuid, groundtruth, verbose)
+            results.append(result)
+        
+        return results

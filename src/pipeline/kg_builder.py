@@ -125,6 +125,14 @@ class KGBuilder:
                 # Get network info
                 network_info_start = time.perf_counter()
                 network_info = await self.network_info_provider.get_info()
+
+                # Integrate ACS Automata context to guide LLM
+                # This provides network science metrics, central entities, and recommendations based on the previous batch state
+                acs_context = self.acs_automata.get_llm_context()
+                if acs_context and "not yet available" not in acs_context:
+                    logger.info("Injecting ACS network context into LLM prompt")
+                    network_info = f"{network_info}\n\n{acs_context}"
+
                 network_info_time = time.perf_counter() - network_info_start
 
                 # LLM injection with hierarchical extraction
@@ -213,7 +221,8 @@ class KGBuilder:
                 except Exception as e:
                     logger.debug(f"Unable to fetch chunk counts post-injection: {e}")
 
-                # Run ACS Automata
+                # Run ACS Automata (Computes metrics AND performs semantic pruning of redundant edges)
+                # This ensures the graph is optimized before the next batch starts
                 acs_start = time.perf_counter()
                 acs_metrics = await self.acs_automata.update_metrics()
                 acs_time = time.perf_counter() - acs_start
