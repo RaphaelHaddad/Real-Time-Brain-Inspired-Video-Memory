@@ -72,6 +72,10 @@ PARAM_NAMES = {
     'max_inter_chunk_relations': 'Max Inter-Chunk\nRelations',
     'max_merge_instructions': 'Max Merge\nInstructions',
     'max_prune_instructions': 'Max Prune\nInstructions',
+    'top_k': 'Top K\nRetrieval',
+    'graph_hops': 'Graph\nHops',
+    'question_per_chunk': 'Questions\nper Chunk',
+    'community_resolution': 'Community\nResolution',
 }
 
 PARAM_SHORT = {
@@ -80,6 +84,10 @@ PARAM_SHORT = {
     'max_inter_chunk_relations': 'Inter-Chunk',
     'max_merge_instructions': 'Merge',
     'max_prune_instructions': 'Prune',
+    'top_k': 'Top K',
+    'graph_hops': 'Hops',
+    'question_per_chunk': 'Q/Chunk',
+    'community_resolution': 'Resolution',
 }
 
 METRIC_NAMES = {
@@ -203,7 +211,8 @@ def load_network_metrics(df: pd.DataFrame, sweep_dir: Path) -> pd.DataFrame:
 def compute_descriptive_stats(df: pd.DataFrame) -> Dict[str, Any]:
     """Compute descriptive statistics for all metrics and parameters."""
     params = ['max_connection_subgraph', 'max_new_triplets', 'max_inter_chunk_relations',
-              'max_merge_instructions', 'max_prune_instructions']
+              'max_merge_instructions', 'max_prune_instructions', 'top_k', 'graph_hops',
+              'question_per_chunk', 'community_resolution']
     metrics = ['accuracy', 'avg_retrieval_time', 'kg_build_time']
     
     stats_dict = {
@@ -238,7 +247,8 @@ def compute_descriptive_stats(df: pd.DataFrame) -> Dict[str, Any]:
 def compute_correlations(df: pd.DataFrame) -> pd.DataFrame:
     """Compute correlation matrix between parameters and metrics."""
     params = ['max_connection_subgraph', 'max_new_triplets', 'max_inter_chunk_relations',
-              'max_merge_instructions', 'max_prune_instructions']
+              'max_merge_instructions', 'max_prune_instructions', 'top_k', 'graph_hops',
+              'question_per_chunk', 'community_resolution']
     metrics = ['accuracy', 'avg_retrieval_time', 'kg_build_time']
     
     cols = params + metrics
@@ -250,7 +260,8 @@ def compute_correlations(df: pd.DataFrame) -> pd.DataFrame:
 def compute_parameter_importance(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     """Compute feature importance for each metric using Random Forest."""
     params = ['max_connection_subgraph', 'max_new_triplets', 'max_inter_chunk_relations',
-              'max_merge_instructions', 'max_prune_instructions']
+              'max_merge_instructions', 'max_prune_instructions', 'top_k', 'graph_hops',
+              'question_per_chunk', 'community_resolution']
     metrics = ['accuracy', 'avg_retrieval_time', 'kg_build_time']
     
     X = df[params].values
@@ -281,7 +292,8 @@ def compute_parameter_importance(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
 def perform_regression_analysis(df: pd.DataFrame) -> Dict[str, Any]:
     """Perform multiple linear regression for each metric."""
     params = ['max_connection_subgraph', 'max_new_triplets', 'max_inter_chunk_relations',
-              'max_merge_instructions', 'max_prune_instructions']
+              'max_merge_instructions', 'max_prune_instructions', 'top_k', 'graph_hops',
+              'question_per_chunk', 'community_resolution']
     metrics = ['accuracy', 'avg_retrieval_time', 'kg_build_time']
     
     results = {}
@@ -310,7 +322,8 @@ def perform_regression_analysis(df: pd.DataFrame) -> Dict[str, Any]:
 def find_optimal_configurations(df: pd.DataFrame) -> Dict[str, Any]:
     """Find optimal parameter configurations for different objectives."""
     params = ['max_connection_subgraph', 'max_new_triplets', 'max_inter_chunk_relations',
-              'max_merge_instructions', 'max_prune_instructions']
+              'max_merge_instructions', 'max_prune_instructions', 'top_k', 'graph_hops',
+              'question_per_chunk', 'community_resolution']
     
     results = {}
     
@@ -374,7 +387,8 @@ def find_optimal_configurations(df: pd.DataFrame) -> Dict[str, Any]:
 def perform_anova_analysis(df: pd.DataFrame) -> Dict[str, Any]:
     """Perform ANOVA/Kruskal-Wallis tests for categorical parameter effects."""
     params = ['max_connection_subgraph', 'max_new_triplets', 'max_inter_chunk_relations',
-              'max_merge_instructions', 'max_prune_instructions']
+              'max_merge_instructions', 'max_prune_instructions', 'top_k', 'graph_hops',
+              'question_per_chunk', 'community_resolution']
     metrics = ['accuracy', 'avg_retrieval_time', 'kg_build_time']
     
     results = {}
@@ -518,9 +532,10 @@ def plot_metric_distributions(df: pd.DataFrame, output_dir: Path):
 def plot_parameter_effects(df: pd.DataFrame, output_dir: Path):
     """Plot effect of each parameter on accuracy with trend lines."""
     params = ['max_connection_subgraph', 'max_new_triplets', 'max_inter_chunk_relations',
-              'max_merge_instructions', 'max_prune_instructions']
+              'max_merge_instructions', 'max_prune_instructions', 'top_k', 'graph_hops',
+              'question_per_chunk', 'community_resolution']
     
-    fig, axes = plt.subplots(2, 3, figsize=(14, 9))
+    fig, axes = plt.subplots(3, 3, figsize=(18, 12))
     axes = axes.flatten()
     
     for i, param in enumerate(params):
@@ -630,7 +645,8 @@ def plot_accuracy_vs_time_tradeoff(df: pd.DataFrame, optimal: Dict, output_dir: 
 def plot_pairwise_interactions(df: pd.DataFrame, output_dir: Path):
     """Plot pairwise parameter interactions for accuracy."""
     params = ['max_new_triplets', 'max_inter_chunk_relations', 
-              'max_merge_instructions', 'max_prune_instructions']
+              'max_merge_instructions', 'max_prune_instructions', 'top_k', 'graph_hops',
+              'question_per_chunk', 'community_resolution']
     
     n_params = len(params)
     fig, axes = plt.subplots(n_params-1, n_params-1, figsize=(12, 12))
@@ -709,9 +725,10 @@ def plot_epoch_progression(df: pd.DataFrame, output_dir: Path):
 def plot_boxplots_by_parameter(df: pd.DataFrame, output_dir: Path):
     """Create box plots showing accuracy distribution by parameter bins."""
     params = ['max_connection_subgraph', 'max_new_triplets', 'max_inter_chunk_relations',
-              'max_merge_instructions', 'max_prune_instructions']
+              'max_merge_instructions', 'max_prune_instructions', 'top_k', 'graph_hops',
+              'question_per_chunk', 'community_resolution']
     
-    fig, axes = plt.subplots(2, 3, figsize=(14, 9))
+    fig, axes = plt.subplots(3, 3, figsize=(18, 12))
     axes = axes.flatten()
     
     for i, param in enumerate(params):
@@ -741,9 +758,6 @@ def plot_boxplots_by_parameter(df: pd.DataFrame, output_dir: Path):
         ax.tick_params(axis='x', rotation=45)
         
         df.drop('_cat', axis=1, inplace=True)
-    
-    # Remove extra subplot
-    axes[5].axis('off')
     
     fig.suptitle('Accuracy Distribution by Parameter Ranges', fontsize=14, fontweight='bold', y=1.02)
     

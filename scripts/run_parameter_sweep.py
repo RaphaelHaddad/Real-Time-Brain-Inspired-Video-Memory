@@ -49,6 +49,15 @@ class ParameterRange:
     yaml_path: List[str]  # Path in YAML hierarchy, e.g., ['chunking', 'max_new_triplets']
 
 
+@dataclass
+class FloatParameterRange:
+    """Defines the range for a float parameter to sweep."""
+    name: str
+    min_val: float
+    max_val: float
+    yaml_path: List[str]
+
+
 # Parameters to sweep with their ranges
 SWEEP_PARAMETERS = [
     ParameterRange("max_connection_subgraph", 2, 3, ["chunking", "max_connection_subgraph"]),
@@ -56,6 +65,22 @@ SWEEP_PARAMETERS = [
     ParameterRange("max_inter_chunk_relations", 1, 20, ["chunking", "max_inter_chunk_relations"]),  # Reduced from 20
     ParameterRange("max_merge_instructions", 1, 15, ["chunking", "max_merge_instructions"]),  # Reduced from 12
     ParameterRange("max_prune_instructions", 1, 20, ["chunking", "max_prune_instructions"]),  # Reduced from 20
+    # Retrieval sweep parameters
+    ParameterRange("top_k", 4, 12, ["retrieval", "top_k"]),
+    ParameterRange("graph_hops", 2, 5, ["retrieval", "graph_hops"]),
+]
+
+# Community-specific sweep parameter ranges. These will be applied only
+# when community_high_graph.community_creator and community_high_graph.community_retriever
+# are enabled in the base config. question_per_chunk is an integer in [1..6].
+# community_resolution is the Leiden resolution/gamma parameter. We use the range [0.1, 2.0] to capture coarse-to-fine
+# partitions. Higher gamma leads to a higher resolution (more smaller communities), smaller gamma leads to fewer larger communities.
+COMMUNITY_SWEEP_INT_PARAMETERS = [
+    ParameterRange("question_per_chunk", 1, 6, ["community_high_graph", "question_per_chunk"]),
+]
+
+COMMUNITY_SWEEP_FLOAT_PARAMETERS = [
+    FloatParameterRange("community_resolution", 0.1, 2.0, ["community_high_graph", "community_resolution"]),
 ]
 
 # Fixed paths
@@ -70,7 +95,7 @@ class EpochResult:
     """Results from a single epoch."""
     epoch: int
     graph_uuid: str
-    parameters: Dict[str, int]
+    parameters: Dict[str, Any]
     accuracy: Optional[float] = None
     total_queries: int = 0
     correct_queries: int = 0
@@ -160,6 +185,19 @@ def sample_parameters() -> Dict[str, int]:
     params = {}
     for param in SWEEP_PARAMETERS:
         params[param.name] = random.randint(param.min_val, param.max_val)
+    return params
+
+
+def sample_float_parameters() -> Dict[str, float]:
+    """Sample random values for float sweep parameters (community resolution).
+
+    Returns a dict mapping parameter name to float value.
+    """
+    params = {}
+    # Sample float parameters
+    for param in COMMUNITY_SWEEP_FLOAT_PARAMETERS:
+        # Use uniform distribution for resolution/gamma
+        params[param.name] = round(random.uniform(param.min_val, param.max_val), 3)
     return params
 
 
@@ -414,9 +452,37 @@ class EpochRunner:
         for name, value in params.items():
             self.log.info(f"    {name}: {value}")
         
-        # Load base config and apply parameters
+        # Load base config and apply parameters (core sweep params)
         config = load_yaml(self.base_config_path)
         apply_parameters_to_config(config, params)
+
+    # If community_high_graph is enabled for both creator and retriever,
+        # sample community-specific parameters and apply them.
+        community_config = get_nested_value(config, ["community_high_graph"], {})
+        if community_config and community_config.get("community_creator") and community_config.get("community_retriever"):
+            self.log.info("Community creator and retriever enabled — sampling community parameters...")
+            # Sample integer community params
+            for cparam in COMMUNITY_SWEEP_INT_PARAMETERS:
+                sampled = random.randint(cparam.min_val, cparam.max_val)
+                set_nested_value(config, cparam.yaml_path, sampled)
+                params[cparam.name] = sampled
+
+            # Sample float community params
+            float_params = sample_float_parameters()
+            for name, value in float_params.items():
+                # Find corresponding yaml path and write
+                for fparam in COMMUNITY_SWEEP_FLOAT_PARAMETERS:
+                    if fparam.name == name:
+                        set_nested_value(config, fparam.yaml_path, value)
+                        # Save rounded value for result metadata
+                        params[name] = value
+                        # Explain impact of gamma to the user via logs
+                        self.log.info(
+                            f"  community_resolution (gamma) sampled: {value} - "
+                            "Higher gamma -> higher resolution -> more smaller communities; "
+                            "Lower gamma -> lower resolution -> fewer larger communities"
+                        )
+                        break
         
         # Ensure subgraph_extraction_injection is enabled for subgraph runs
         set_nested_value(config, ["llm_injector", "subgraph_extraction_injection"], True)

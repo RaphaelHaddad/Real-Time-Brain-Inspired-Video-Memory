@@ -334,16 +334,21 @@ class KGBuilder:
             if self.online_retriever:
                 await self.online_retriever.close()
 
-    def _clean_data(self, triplets: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    def _clean_data(self, triplets: List[Dict[str, Any]]) -> List[Dict[str, str]]:
         """Industry-standard data cleaning for graph data"""
         cleaned = []
         seen = set()
 
         for triplet in triplets:
-            # Normalize entity names
-            head = triplet.get("head", "").strip().lower()
-            tail = triplet.get("tail", "").strip().lower()
-            rel = triplet.get("relation", "").strip().upper()
+            # Normalize entity names - handle cases where values might be lists
+            def normalize_value(value):
+                if isinstance(value, list):
+                    return " ".join(str(item) for item in value)
+                return str(value)
+            
+            head = normalize_value(triplet.get("head", "")).strip().lower()
+            tail = normalize_value(triplet.get("tail", "")).strip().lower()
+            rel = normalize_value(triplet.get("relation", "")).strip().upper()
 
             # Skip empty or invalid triplets
             if not head or not tail or not rel:

@@ -30,7 +30,7 @@ chunking:
   use_sentence_boundaries: true
   parallel_count: 2
   enable_global_refinement: true
-  refinement_max_tokens: 6000
+  refinement_max_tokens: 4000
   global_triplet_limit: 15  # Reduced from 25 to reduce token usage
   # Limits for instruction-based global refinement outputs
   max_new_triplets: 10  # Reduced from 20
@@ -89,8 +89,7 @@ benchmark_llm:
   top_p: 0.9
   max_tokens: 2048
 
-# Community-based high-level graph configuration
-# When enabled, creates question nodes per chunk and detects communities using Leiden
+
 community_high_graph:
   community_creator: true  # Enable community-aware KG building with question generation
   community_retriever: true  # Enable community-based retrieval (similarity on CommunitySummary nodes)
