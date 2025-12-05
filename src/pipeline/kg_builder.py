@@ -153,14 +153,8 @@ class KGBuilder:
 
                 # Get network info
                 network_info_start = time.perf_counter()
-                network_info = await self.network_info_provider.get_info()
-                
-                # Fetch schema context to guide LLM against repetitive relations
-                schema_context = await self._get_schema_context()
-                if isinstance(network_info, dict):
-                    network_info['schema_summary'] = schema_context
-                elif isinstance(network_info, str):
-                    network_info += f"\n\n{schema_context}"
+                # Use new rich context builder instead of simple provider
+                network_info = await self._build_llm_context(batch_idx)
                 
                 network_info_time = time.perf_counter() - network_info_start
 
@@ -232,11 +226,19 @@ class KGBuilder:
                 if self.pruning_embedder:
                     prune_start = time.perf_counter()
                     before_prune = len(cleaned_triplets)
+                    
                     # Apply pruning against both batch and existing graph
-                    cleaned_triplets = await self._apply_pruning(cleaned_triplets)
+                    # Returns (triplets_to_add, relationships_to_delete_from_db)
+                    cleaned_triplets, pruned_existing = await self._apply_pruning(cleaned_triplets)
+                    
+                    # Execute deletion of pruned existing relationships in Neo4j
+                    if pruned_existing:
+                        logger.info(f"Deleting {len(pruned_existing)} existing relationships identified as redundant...")
+                        await self.neo4j_handler.delete_relationships(pruned_existing)
+
                     prune_time = time.perf_counter() - prune_start
                     if len(cleaned_triplets) < before_prune:
-                        logger.info(f"Pruned {before_prune - len(cleaned_triplets)} redundant triplets in {prune_time:.2f}s")
+                        logger.info(f"Pruned {before_prune - len(cleaned_triplets)} redundant new triplets in {prune_time:.2f}s")
 
                 clean_time = time.perf_counter() - clean_start
 
@@ -348,27 +350,120 @@ class KGBuilder:
 
         return cleaned
 
-    async def _get_schema_context(self) -> str:
-        """Fetch summary of existing relationship types to guide LLM"""
+    async def _build_llm_context(self, batch_idx: int) -> str:
+        """Build rich context for LLM using ACS metrics and Graph stats"""
         try:
-            query = """
-            MATCH ()-[r]->() 
-            RETURN type(r) as rel, count(r) as c 
-            ORDER BY c DESC 
-            LIMIT 50
-            """
-            schema_lines = []
-            async with self.neo4j_handler.driver.session() as session:
-                result = await session.run(query)
-                async for record in result:
-                    schema_lines.append(f"- {record['rel']} (count: {record['c']})")
+            # 1. Gather Metrics
+            acs_metrics = self.acs_automata.metrics_cache
+            node_count = await self.neo4j_handler.get_node_count()
+            rel_count = await self.neo4j_handler.get_relationship_count()
             
-            if not schema_lines:
-                return ""
-            return "Existing Graph Schema (Common Relations):\n" + "\n".join(schema_lines)
+            # 2. Get Top Relations (Semantic Metrics)
+            top_relations = []
+            async with self.neo4j_handler.driver.session() as session:
+                res = await session.run("""
+                    MATCH ()-[r]-() 
+                    WHERE r.graph_uuid = $uuid
+                    RETURN type(r) as t, count(r) as c 
+                    ORDER BY c DESC LIMIT 15
+                """, uuid=self.run_uuid)
+                async for record in res:
+                    top_relations.append(record['t'])
+
+            # 3. Get Top Entities (Centrality)
+            top_entities = []
+            # Use PageRank from ACS if available, otherwise simple degree
+            if 'pagerank_top10_percent' in acs_metrics:
+                # We need names, ACS just gives a score. Let's query Neo4j for high degree nodes as proxy
+                async with self.neo4j_handler.driver.session() as session:
+                    res = await session.run("""
+                        MATCH (n:GraphNode) 
+                        WHERE n.graph_uuid = $uuid
+                        RETURN n.name as name, COUNT { (n)--() } as degree 
+                        ORDER BY degree DESC LIMIT 15
+                    """, uuid=self.run_uuid)
+                    async for record in res:
+                        top_entities.append(record['name'])
+
+            # 4. Construct Metrics Dict for Formatter
+            metrics = {
+                'basic_stats': {
+                    'node_count': node_count,
+                    'edge_count': rel_count,
+                    'density': acs_metrics.get('density', 0),
+                    'is_connected': acs_metrics.get('weakly_connected_components', 1) == 1,
+                    'num_components': acs_metrics.get('weakly_connected_components', 1)
+                },
+                'llm_guidance': {
+                    'graph_maturity': "Emerging" if batch_idx < 5 else ("Developing" if batch_idx < 20 else "Mature"),
+                    'key_entities_in_graph': top_entities,
+                    'recommendations': [
+                        "Reuse existing entities where possible.",
+                        "Avoid creating generic nodes like 'Object' or 'Person' if specific names exist.",
+                        "Merge synonyms (e.g., 'Cup' vs 'Mug') if they refer to the same object."
+                    ],
+                    'focus_areas': ["Spatial Relations", "Object Interactions", "Temporal Sequence"]
+                },
+                'centrality_metrics': {
+                    'prominent_entities': top_entities,
+                    # Mocking detailed node objects for the prompt format
+                    'top_nodes': [{'name': name, 'pagerank': 0.0} for name in top_entities[:5]] 
+                },
+                'semantic_metrics': {
+                    'top_relations': [{'type': t} for t in top_relations]
+                }
+            }
+
+            return self._format_for_llm_prompt(metrics)
+
         except Exception as e:
-            logger.warning(f"Failed to fetch schema context: {e}")
-            return ""
+            logger.warning(f"Failed to build rich LLM context: {e}")
+            return "Graph Context Unavailable."
+
+    def _format_for_llm_prompt(self, metrics: Dict[str, Any]) -> str:
+        """Format metrics into human-readable prompt for LLM"""
+        basic = metrics['basic_stats']
+        guidance = metrics['llm_guidance']
+        
+        prompt = f"""
+        ## Current Knowledge Graph Context
+
+        **Graph Size:** {basic['node_count']} nodes, {basic['edge_count']} relationships
+        **Maturity Level:** {guidance['graph_maturity']}
+        **Density:** {basic.get('density', 0):.3f} (0=sparse, 1=complete)
+        **Connectivity:** {'Connected' if basic.get('is_connected') else f"{basic.get('num_components', 0)} separate components"}
+
+        **Key Entities Already Present:**
+        {', '.join(guidance['key_entities_in_graph'][:10]) if guidance['key_entities_in_graph'] else 'None yet'}
+
+        **Recommendations for This Batch:**
+        {chr(10).join(f"- {rec}" for rec in guidance['recommendations'])}
+
+        **Focus Areas:** {', '.join(guidance['focus_areas'])}
+        """
+        
+        # Add Schema/Vocabulary section for consistency
+        prompt += "\n## Existing Graph Vocabulary (Reuse if necessary to avoid repitition)\n"
+        
+        # Relations
+        if 'semantic_metrics' in metrics:
+            sem = metrics['semantic_metrics']
+            rels = [r['type'] for r in sem.get('top_relations', [])]
+            if rels:
+                prompt += f"**Existing Relationship Types:** {', '.join(rels)}\n"
+
+        # Entities (Expanded list)
+        if 'centrality_metrics' in metrics:
+            cent = metrics['centrality_metrics']
+            entities = cent.get('prominent_entities', [])
+            # Filter out empty names and duplicates
+            entities = sorted(list(set([e for e in entities if e])))
+            if entities:
+                prompt += f"**Common Entities:** {', '.join(entities)}\n"
+            
+        prompt += "\n**Instruction:** Check the list of Common Entities above. If a new entity is a synonym or refers to the same object, use the existing name."
+        
+        return prompt.strip()
 
     async def _fetch_existing_edges(self, entities: List[str]) -> List[Dict[str, Any]]:
         """Fetch existing edges between the given entities from Neo4j"""
@@ -398,10 +493,15 @@ class KGBuilder:
         
         return existing
 
-    async def _apply_pruning(self, triplets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Apply semantic pruning using prune.py logic, considering existing graph edges"""
+    async def _apply_pruning(self, triplets: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """
+        Apply semantic pruning using prune.py logic.
+        Returns:
+            1. List of NEW triplets to add.
+            2. List of EXISTING relationships to DELETE from DB (because they were pruned).
+        """
         if not triplets:
-            return []
+            return [], []
 
         # 1. Get entities involved in new triplets
         entities = list(set([t['head'] for t in triplets] + [t['tail'] for t in triplets]))
@@ -420,48 +520,73 @@ class KGBuilder:
         nodes = set()
         relationships = []
         
+        # Map to track original objects
+        rel_map = [] 
+
         for t in combined_triplets:
             nodes.add(t['head'])
             nodes.add(t['tail'])
-            relationships.append({
+            rel_obj = {
                 "type": t['relation'],
                 "from_node": t['head'],
                 "to_node": t['tail'],
                 "properties": {
                     "source_chunks": t.get("source_chunks", []),
-                    "is_new": t.get("is_new", False)
+                    "is_new": t.get("is_new", False),
+                    "is_existing": t.get("is_existing", False)
                 }
-            })
+            }
+            relationships.append(rel_obj)
             
         graph_data = {
             "nodes": [{"name": n} for n in nodes],
             "relationships": relationships
         }
+        
         logger.info("Trying PRUNING....")
         try:
             # Use Graph class from prune.py with our adapted embedder
             graph = Graph(graph_data, embedding_model=self.pruning_embedder)
             logger.info(f"BEFORE PRUNING: {len(graph_data['relationships'])} Relationships")
-            pruned_rels = graph.prune_graph()
-            logger.info(f"After PRUNING: {len(pruned_rels)} Relationships")
             
-            # Convert back to triplets, keeping ONLY the new ones that survived
-            final_triplets = []
-            for r in pruned_rels:
+            # Run pruning
+            surviving_rels = graph.prune_graph()
+            logger.info(f"After PRUNING: {len(surviving_rels)} Relationships")
+            
+            final_new_triplets = []
+            surviving_existing_signatures = set()
+
+            # Process survivors
+            for r in surviving_rels:
                 props = r.get("properties", {})
+                
                 if props.get("is_new", False):
-                    final_triplets.append({
+                    # This is a new triplet that survived -> Add it
+                    final_new_triplets.append({
                         "head": r['from_node'],
                         "relation": r['type'],
                         "tail": r['to_node'],
                         "source_chunks": props.get("source_chunks", [])
                     })
-            
-            return final_triplets
+                elif props.get("is_existing", False):
+                    # This is an existing triplet that survived -> Keep it (do nothing)
+                    sig = f"{r['from_node']}|{r['type']}|{r['to_node']}"
+                    surviving_existing_signatures.add(sig)
+
+            # Identify existing relationships that were PRUNED (killed)
+            pruned_existing_triplets = []
+            for t in existing_triplets:
+                sig = f"{t['head']}|{t['relation']}|{t['tail']}"
+                if sig not in surviving_existing_signatures:
+                    # It existed in DB but is NOT in survivors -> It was pruned
+                    pruned_existing_triplets.append(t)
+
+            return final_new_triplets, pruned_existing_triplets
             
         except Exception as e:
             logger.error(f"Pruning failed: {e}")
-            return triplets
+            # Fallback: Add all new, delete nothing
+            return triplets, []
 
     def _record_batch_metrics(self, batch_idx: int, total_time: float, timings: Dict[str, float],
                              retrieval_metrics: List[Dict], acs_metrics: Dict[str, Any]):

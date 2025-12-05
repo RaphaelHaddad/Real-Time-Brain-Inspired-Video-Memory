@@ -742,6 +742,38 @@ class Neo4jHandler:
             logger.error(f"Error getting relationship count: {str(e)}")
             return 0
 
+    async def delete_relationships(self, relationships: List[Dict[str, Any]]):
+        """Delete specific relationships from the graph (used for pruning duplicates)"""
+        if not relationships:
+            return
+
+        async with self.driver.session() as session:
+            for rel in relationships:
+                head = rel.get('head')
+                tail = rel.get('tail')
+                relation = rel.get('relation')
+                
+                if not head or not tail or not relation:
+                    continue
+
+                # Normalize relation type for Cypher
+                rel_type = relation.replace(' ', '_').upper()
+                
+                try:
+                    await session.run(
+                        f"""
+                        MATCH (h:Entity {{name: $head, graph_uuid: $graph_uuid}})
+                        MATCH (t:Entity {{name: $tail, graph_uuid: $graph_uuid}})
+                        MATCH (h)-[r:`{rel_type}`]->(t)
+                        DELETE r
+                        """,
+                        head=head, tail=tail, graph_uuid=self.run_uuid
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to delete pruned relationship {head}-[{relation}]->{tail}: {e}")
+            
+            logger.info(f"Deleted {len(relationships)} pruned relationships from Neo4j")
+
     async def close(self):
         """Close the Neo4j driver connection"""
         await self.driver.close()
