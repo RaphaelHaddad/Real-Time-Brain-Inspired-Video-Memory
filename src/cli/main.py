@@ -184,6 +184,51 @@ async def run_benchmark(config_path: str, input_file: str, output_file: str):
     return output_file
 
 
+async def run_precompute(config_path: str, graph_uuid: str, methods: list):
+    """Run pre-retrieval computation (PageRank, CH3-L3) on a knowledge graph"""
+    from src.pipeline.precompute import run_precomputation
+
+    logger.info(f"Loading configuration from: {config_path}")
+    logger.info(f"Running precomputation for graph: {graph_uuid}")
+    logger.info(f"Methods: {methods}")
+
+    results = await run_precomputation(config_path, graph_uuid, methods)
+    
+    for method, stats in results.items():
+        if stats.get("status") == "success":
+            logger.info(f"✓ {method}: {stats.get('nodes_processed', 0)} nodes processed in {stats.get('elapsed_seconds', 0):.2f}s")
+        else:
+            logger.warning(f"✗ {method}: {stats.get('status', 'unknown')} - {stats.get('reason', stats.get('message', ''))}")
+    
+    return results
+
+
+async def check_precomputation_for_retrieval(config_path: str, graph_uuid: str) -> bool:
+    """Check if required precomputation exists for the configured hop method"""
+    from src.components.neo4j_handler import Neo4jHandler
+    
+    config = PipelineConfig.from_yaml(config_path)
+    hop_method = config.retrieval.hop_method
+    
+    # Naive method doesn't require precomputation
+    if hop_method == "naive":
+        return True
+    
+    # Check if precomputation exists
+    neo4j_handler = Neo4jHandler(config.neo4j, config.kg, graph_uuid)
+    try:
+        has_precompute = await neo4j_handler.has_precomputation(graph_uuid, hop_method)
+        
+        if not has_precompute:
+            logger.error(f"❌ Retrieval requires '{hop_method}' precomputation, but graph {graph_uuid} has not been precomputed.")
+            logger.error(f"   Run: python3 -m src.cli.main precompute --config {config_path} --graph-uuid {graph_uuid} --methods {hop_method}")
+            return False
+        
+        return True
+    finally:
+        await neo4j_handler.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description="VidGraph: Video-to-Knowledge Graph Pipeline")
 
@@ -234,6 +279,14 @@ def main():
     benchmark_parser.add_argument('--input', required=True, help='Path to retrieval results JSON file')
     benchmark_parser.add_argument('--output', required=True, help='Path for benchmark results JSON file')
 
+    # Precompute command
+    precompute_parser = subparsers.add_parser('precompute', help='Run pre-retrieval computation (PageRank, CH3-L3)')
+    precompute_parser.add_argument('--config', required=True, help='Path to configuration file')
+    precompute_parser.add_argument('--graph-uuid', required=True, help='UUID of the knowledge graph')
+    precompute_parser.add_argument('--methods', nargs='+', required=True, 
+                                   choices=['page_rank', 'ch3_l3'],
+                                   help='Methods to precompute (page_rank, ch3_l3)')
+
     args = parser.parse_args()
 
     if args.command == 'vlm':
@@ -246,6 +299,10 @@ def main():
         print(f"Knowledge graph construction completed with UUID: {result}")
 
     elif args.command == 'retrieve':
+        # Check if precomputation is required and exists
+        if not asyncio.run(check_precomputation_for_retrieval(args.config, args.graph_uuid)):
+            sys.exit(1)
+        
         # Parse true_chunks into a list of ints if provided
         true_chunks_arg = getattr(args, 'true_chunks', None)
         true_chunks = None
@@ -268,6 +325,10 @@ def main():
         print(f"Retrieval completed: {result}")
 
     elif args.command == 'batch-retrieve':
+        # Check if precomputation is required and exists
+        if not asyncio.run(check_precomputation_for_retrieval(args.config, args.graph_uuid)):
+            sys.exit(1)
+        
         result = asyncio.run(run_batch_offline_retrieval(args.config, args.graph_uuid, args.input, args.output))
         print(f"Batch retrieval completed: {result}")
 
@@ -282,6 +343,10 @@ def main():
     elif args.command == 'benchmark':
         result = asyncio.run(run_benchmark(args.config, args.input, args.output))
         print(f"Benchmark evaluation completed: {result}")
+
+    elif args.command == 'precompute':
+        result = asyncio.run(run_precompute(args.config, args.graph_uuid, args.methods))
+        print(f"Precomputation completed: {json.dumps(result, indent=2)}")
 
     else:
         parser.print_help()

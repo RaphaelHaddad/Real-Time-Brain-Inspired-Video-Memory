@@ -1208,6 +1208,235 @@ class Neo4jHandler:
             logger.error(f"Error getting entities from chunks: {e}")
             return []
 
+    # ========== Pre-retrieval Computation Methods ==========
+
+    async def graph_exists(self, graph_uuid: str) -> bool:
+        """
+        Check if a graph with the given UUID exists.
+        
+        Args:
+            graph_uuid: UUID of the graph to check
+            
+        Returns:
+            True if graph exists, False otherwise
+        """
+        try:
+            async with self.driver.session() as session:
+                result = await session.run(
+                    """
+                    MATCH (n {graph_uuid: $graph_uuid})
+                    RETURN count(n) > 0 AS exists
+                    LIMIT 1
+                    """,
+                    graph_uuid=graph_uuid
+                )
+                record = await result.single()
+                return record["exists"] if record else False
+        except Exception as e:
+            logger.error(f"Error checking graph existence: {e}")
+            return False
+
+    async def set_precomputation_flag(self, graph_uuid: str, method: str, value: bool) -> None:
+        """
+        Set a flag indicating that precomputation has been performed for a method.
+        Stores this as a property on a special GraphMetadata node.
+        
+        Args:
+            graph_uuid: UUID of the graph
+            method: Precomputation method ('page_rank', 'ch3_l3')
+            value: True if precomputation is complete, False otherwise
+        """
+        try:
+            async with self.driver.session() as session:
+                # Create or update GraphMetadata node
+                await session.run(
+                    """
+                    MERGE (m:GraphMetadata:GraphNode {graph_uuid: $graph_uuid})
+                    SET m[$method_flag] = $value
+                    """,
+                    graph_uuid=graph_uuid,
+                    method_flag=f"precomputed_{method}",
+                    value=value
+                )
+                logger.info(f"Set precomputation flag for {method} = {value}")
+        except Exception as e:
+            logger.error(f"Error setting precomputation flag: {e}")
+
+    async def has_precomputation(self, graph_uuid: str, method: str) -> bool:
+        """
+        Check if precomputation has been performed for a given method.
+        
+        Args:
+            graph_uuid: UUID of the graph
+            method: Precomputation method ('page_rank', 'ch3_l3')
+            
+        Returns:
+            True if precomputation exists, False otherwise
+        """
+        try:
+            async with self.driver.session() as session:
+                result = await session.run(
+                    """
+                    MATCH (m:GraphMetadata:GraphNode {graph_uuid: $graph_uuid})
+                    RETURN m[$method_flag] AS has_precompute
+                    """,
+                    graph_uuid=graph_uuid,
+                    method_flag=f"precomputed_{method}"
+                )
+                record = await result.single()
+                return bool(record["has_precompute"]) if record else False
+        except Exception as e:
+            logger.error(f"Error checking precomputation flag: {e}")
+            return False
+
+    async def get_ppr_top_neighbors(self, entity_name: str, top_k: int = 10) -> List[Dict[str, Any]]:
+        """
+        Get top-K neighbors for an entity based on precomputed PPR scores.
+        
+        Args:
+            entity_name: Name of the entity
+            top_k: Number of neighbors to return
+            
+        Returns:
+            List of dicts with 'node' and 'score' keys
+        """
+        try:
+            async with self.driver.session() as session:
+                result = await session.run(
+                    """
+                    MATCH (e:Entity {name: $name, graph_uuid: $graph_uuid})
+                    WHERE e.ppr_top_neighbors IS NOT NULL
+                    RETURN e.ppr_top_neighbors AS scores
+                    """,
+                    name=entity_name,
+                    graph_uuid=self.run_uuid
+                )
+                record = await result.single()
+                
+                if not record or not record["scores"]:
+                    return []
+                
+                # Parse JSON scores
+                scores = json.loads(record["scores"])
+                return scores[:top_k]
+                
+        except Exception as e:
+            logger.warning(f"Error getting PPR neighbors for {entity_name}: {e}")
+            return []
+
+    async def get_ch3l3_top_candidates(self, entity_name: str, top_k: int = 3) -> List[Dict[str, Any]]:
+        """
+        Get top-K candidates for an entity based on precomputed CH3-L3 scores.
+        
+        Args:
+            entity_name: Name of the entity
+            top_k: Number of candidates to return
+            
+        Returns:
+            List of dicts with 'node' and 'score' keys
+        """
+        try:
+            async with self.driver.session() as session:
+                result = await session.run(
+                    """
+                    MATCH (e:Entity {name: $name, graph_uuid: $graph_uuid})
+                    WHERE e.ch3l3_scores IS NOT NULL
+                    RETURN e.ch3l3_scores AS scores
+                    """,
+                    name=entity_name,
+                    graph_uuid=self.run_uuid
+                )
+                record = await result.single()
+                
+                if not record or not record["scores"]:
+                    return []
+                
+                # Parse JSON scores
+                scores = json.loads(record["scores"])
+                return scores[:top_k]
+                
+        except Exception as e:
+            logger.warning(f"Error getting CH3-L3 candidates for {entity_name}: {e}")
+            return []
+
+    async def get_chunks_for_entities(self, entity_names: List[str]) -> List[Dict[str, Any]]:
+        """
+        Get chunks associated with the given entities via FROM_CHUNK relationships.
+        
+        Args:
+            entity_names: List of entity names
+            
+        Returns:
+            List of chunk dicts with id, content, time
+        """
+        if not entity_names:
+            return []
+        
+        try:
+            async with self.driver.session() as session:
+                result = await session.run(
+                    """
+                    MATCH (e:Entity {graph_uuid: $graph_uuid})-[:FROM_CHUNK]->(c:Chunk {graph_uuid: $graph_uuid})
+                    WHERE e.name IN $entity_names
+                    RETURN DISTINCT c.id AS chunk_id, c.content AS content, c.time AS chunk_time
+                    """,
+                    graph_uuid=self.run_uuid,
+                    entity_names=entity_names
+                )
+                
+                chunks = []
+                async for record in result:
+                    chunks.append({
+                        "id": record["chunk_id"],
+                        "content": record["content"],
+                        "time": record["chunk_time"],
+                        "source": "entity_hop"
+                    })
+                
+                return chunks
+        except Exception as e:
+            logger.error(f"Error getting chunks for entities: {e}")
+            return []
+
+    async def get_entity_relationships(self, entity_names: List[str]) -> List[Dict[str, Any]]:
+        """
+        Get relationships between the given entities.
+        
+        Args:
+            entity_names: List of entity names
+            
+        Returns:
+            List of relationship dicts with description
+        """
+        if not entity_names:
+            return []
+        
+        try:
+            async with self.driver.session() as session:
+                result = await session.run(
+                    """
+                    MATCH (e1:Entity {graph_uuid: $graph_uuid})-[r]->(e2:Entity {graph_uuid: $graph_uuid})
+                    WHERE e1.name IN $entity_names AND e2.name IN $entity_names
+                    AND type(r) <> 'FROM_CHUNK'
+                    RETURN DISTINCT e1.name AS start_name, type(r) AS rel_type, e2.name AS end_name
+                    """,
+                    graph_uuid=self.run_uuid,
+                    entity_names=entity_names
+                )
+                
+                relationships = []
+                async for record in result:
+                    desc = f"{record['start_name']} -[{record['rel_type']}]-> {record['end_name']}"
+                    relationships.append({
+                        "description": desc,
+                        "source": "entity_hop"
+                    })
+                
+                return relationships
+        except Exception as e:
+            logger.error(f"Error getting entity relationships: {e}")
+            return []
+
     async def close(self):
         """Close the Neo4j driver connection"""
         await self.driver.close()

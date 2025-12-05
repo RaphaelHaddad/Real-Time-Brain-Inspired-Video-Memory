@@ -68,7 +68,7 @@ retrieval:
   reranker_endpoint: "http://localhost:8070/v1/rerank"
   reranker_api_key: ""
   reranker_model: "qwen-reranker"
-  top_k: 5
+  top_k: 9
   top_k_chunks: 3
   top_k_entities: 5
   top_k_relationships: 5
@@ -80,6 +80,14 @@ retrieval:
   rerank_after_traversal: true
   rerank_entities: true
   rerank_relationships: true
+  # Hop method: 'naive' (BFS traversal), 'page_rank' (PPR-guided), 'ch3_l3' (path-based with CH3-L3 scores)
+  hop_method: ch3_l3
+  # CH3-L3 specific retrieval parameters
+  top_k_hop_ch3_l3: 4  # Top K candidates per hop for CH3-L3 traversal
+  max_path_length_ch3: 4  # Maximum path length for CH3-L3 traversal
+  cum_score_aggregation: product  # Score aggregation: 'product' or 'sum'
+  # PageRank specific retrieval parameters
+  top_k_hop_pagerank: 10  # Top K candidates per hop for PageRank traversal
 
 benchmark_llm:
   endpoint: "http://localhost:8078/v1"
@@ -100,3 +108,17 @@ community_high_graph:
 
 # Save per-batch network metrics to a file while the run progresses
 saving_batch_metrics: true
+
+# Pre-retrieval computation settings (PageRank, CH3-L3)
+pre_retrieval_computation:
+  auto_precompute_on_kg_build: false  # Run precomputation automatically after KG build
+  pagerank:
+    alpha: 0.15  # Teleport probability (damping = 1 - alpha)
+    max_steps: 100  # Max power iteration steps (increased for convergence)
+    top_k_per_node: 50  # Top K neighbors to store per node
+    min_score: 0.001  # Minimum score threshold to store
+  ch3_l3:
+    candidates_per_node: 200  # Top K candidates to store per node
+    min_ch3_score: 0.2  # Minimum CH3-L3 score threshold
+    external_degree_approx: 2  # Approximation factor for external degree
+    batch_size: 50  # Batch size for processing nodes

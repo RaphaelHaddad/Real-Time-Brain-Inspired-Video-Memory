@@ -1,6 +1,30 @@
 from pydantic import BaseModel, Field, validator
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 import yaml
+
+
+class PageRankConfig(BaseModel):
+    """Configuration for PageRank precomputation"""
+    alpha: float = 0.15  # Teleport probability (damping factor = 1-alpha)
+    max_steps: int = 20  # Max iterations for power iteration
+    top_k_per_node: int = 50  # Top K neighbors to store per node
+    min_score: float = 0.001  # Minimum score threshold to store
+
+
+class CH3L3Config(BaseModel):
+    """Configuration for CH3-L3 precomputation"""
+    candidates_per_node: int = 200  # Top K candidates to store per node
+    min_ch3_score: float = 0.2  # Minimum CH3-L3 score threshold
+    external_degree_approx: int = 2  # Approximation factor for external degree
+    batch_size: int = 50  # Batch size for processing nodes
+
+
+class PreRetrievalComputationConfig(BaseModel):
+    """Configuration for pre-retrieval computation (PageRank, CH3-L3)"""
+    auto_precompute_on_kg_build: bool = False  # Run precomputation automatically after KG build
+    pagerank: PageRankConfig = PageRankConfig()
+    ch3_l3: CH3L3Config = CH3L3Config()
+
 
 class VideoConfig(BaseModel):
     chunk_size_seconds: float = Field(5.0, gt=0)
@@ -84,6 +108,14 @@ class RetrievalConfig(BaseModel):
     rerank_after_traversal: bool = False  # Rerank after traversal instead of after vector search
     rerank_entities: bool = False  # Rerank entities separately
     rerank_relationships: bool = False  # Rerank relationships separately
+    # Hop method: 'naive' (default BFS), 'page_rank' (PPR-guided), 'ch3_l3' (path-based)
+    hop_method: Literal["naive", "page_rank", "ch3_l3"] = "naive"
+    # CH3-L3 specific retrieval parameters
+    top_k_hop_ch3_l3: int = 3  # Top K candidates per hop for CH3-L3
+    max_path_length_ch3: int = 3  # Maximum path length for CH3-L3 traversal
+    cum_score_aggregation: Literal["product", "sum"] = "product"  # Score aggregation method
+    # PageRank specific retrieval parameters
+    top_k_hop_pagerank: int = 10  # Top K candidates per hop for PageRank
 
 class BenchmarkLLMConfig(BaseModel):
     """Configuration for benchmark evaluation using LLM"""
@@ -114,6 +146,7 @@ class PipelineConfig(BaseModel):
     retrieval: RetrievalConfig
     benchmark_llm: Optional[BenchmarkLLMConfig] = None
     community_high_graph: CommunityHighGraphConfig = CommunityHighGraphConfig()
+    pre_retrieval_computation: PreRetrievalComputationConfig = PreRetrievalComputationConfig()
     # Save batch-level network metrics to a separate file after each batch
     saving_batch_metrics: bool = True
 

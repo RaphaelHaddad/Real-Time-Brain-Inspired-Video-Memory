@@ -262,6 +262,28 @@ The benchmark pipeline:
 
 See [BENCHMARK_GUIDE.md](BENCHMARK_GUIDE.md) for detailed documentation.
 
+### 7. Pre-Retrieval Computation (Optional)
+
+Before running retrieval, you can precompute graph traversal scores for enhanced retrieval using PageRank or CH3-L3 algorithms:
+
+```bash
+# Precompute PageRank scores
+python3 -m src.cli.main precompute --config config/base_config.yaml --graph-uuid <graph-uuid> --methods page_rank
+
+# Precompute CH3-L3 scores
+python3 -m src.cli.main precompute --config config/base_config.yaml --graph-uuid <graph-uuid> --methods ch3_l3
+
+# Precompute both
+python3 -m src.cli.main precompute --config config/base_config.yaml --graph-uuid <graph-uuid> --methods page_rank ch3_l3
+```
+
+**Hop Methods** (configure in `base_config.yaml` under `retrieval.hop_method`):
+- `naive`: Default BFS traversal (no precomputation required)
+- `page_rank`: Uses Personalized PageRank to rank neighbors by relevance
+- `ch3_l3`: Uses CH3-L3 (3-hop local clustering) for path-based traversal with cumulative scoring
+
+**Note**: If `hop_method` is set to `page_rank` or `ch3_l3`, you must run `precompute` before retrieval. The CLI will error if precomputation is missing.
+
 ## Pre-injection vs Injection
 
 <details>
@@ -308,6 +330,8 @@ Query a specific knowledge graph:
 ```bash
 python3 -m src.cli.main retrieve --config config/base_config.yaml --graph-uuid <graph-uuid> --query "Your query here" --groundtruth "Expected answer for evaluation (optional)"
 ```
+
+**Note**: If using `page_rank` or `ch3_l3` as `hop_method`, run `precompute` first (see section 7).
 
 ## Configuration Files
 

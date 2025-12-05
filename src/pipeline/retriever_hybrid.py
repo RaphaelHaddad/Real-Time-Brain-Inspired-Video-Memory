@@ -482,12 +482,28 @@ class HybridRetriever:
             return []
 
     async def _expand_entity_graph_with_chunks(self, session, entities: List[Dict], hops: int = None) -> tuple[List[Dict], List[Dict], List[Dict]]:
-        """Expand entity graph via relationship traversal, collecting entities, chunks, and relationships"""
+        """
+        Expand entity graph based on configured hop_method.
+        Dispatches to appropriate method: naive (BFS), page_rank (PPR-guided), or ch3_l3 (path-based).
+        """
+        hop_method = self.config.hop_method
+        logger.info(f"🔍 Using hop method: {hop_method}")
+        
+        if hop_method == "page_rank":
+            return await self._expand_via_pagerank(entities)
+        elif hop_method == "ch3_l3":
+            return await self._expand_via_ch3l3(entities)
+        else:
+            # Default: naive BFS traversal
+            return await self._expand_entity_graph_naive(session, entities, hops)
+
+    async def _expand_entity_graph_naive(self, session, entities: List[Dict], hops: int = None) -> tuple[List[Dict], List[Dict], List[Dict]]:
+        """Expand entity graph via naive BFS relationship traversal, collecting entities, chunks, and relationships"""
         if not entities or not hops:
             hops = self.config.graph_hops
         
         try:
-            logger.debug(f"Expanding entity graph with {hops} hops")
+            logger.debug(f"Expanding entity graph with {hops} hops (naive BFS)")
             expanded_entities = set()
             traversal_chunks = set()
             traversal_relationships = set()
@@ -549,6 +565,167 @@ class HybridRetriever:
         
         except Exception as e:
             logger.warning(f"Graph expansion failed: {e}")
+            return [], [], []
+
+    async def _expand_via_pagerank(self, entities: List[Dict]) -> tuple[List[Dict], List[Dict], List[Dict]]:
+        """
+        Expand entity graph using precomputed Personalized PageRank scores.
+        For each seed entity, retrieves top-K neighbors based on PPR.
+        
+        Returns:
+            tuple: (expanded_entities, chunks, relationships)
+        """
+        if not entities:
+            return [], [], []
+        
+        try:
+            logger.debug(f"Expanding via PageRank for {len(entities)} seed entities")
+            top_k = self.config.top_k_hop_pagerank
+            
+            expanded_entities = set()
+            all_entity_names = set()
+            
+            # Add seed entities
+            for entity in entities:
+                all_entity_names.add(entity["name"])
+            
+            # Get PPR neighbors for each seed entity
+            for entity in entities:
+                ppr_neighbors = await self.neo4j_handler.get_ppr_top_neighbors(
+                    entity["name"], top_k=top_k
+                )
+                
+                for neighbor in ppr_neighbors:
+                    node_name = neighbor.get("node", "")
+                    if node_name:
+                        expanded_entities.add(node_name)
+                        all_entity_names.add(node_name)
+            
+            # Get chunks for all expanded entities
+            chunks = await self.neo4j_handler.get_chunks_for_entities(list(all_entity_names))
+            
+            # Get relationships between expanded entities
+            relationships = await self.neo4j_handler.get_entity_relationships(list(all_entity_names))
+            
+            # Convert to list format
+            expanded_list = [
+                {"name": n, "batch_time": "", "source": "pagerank_traversal"} 
+                for n in expanded_entities
+            ]
+            
+            logger.debug(f"PageRank expansion: {len(expanded_list)} entities, {len(chunks)} chunks, {len(relationships)} relationships")
+            return expanded_list, chunks, relationships
+        
+        except Exception as e:
+            logger.warning(f"PageRank expansion failed: {e}")
+            return [], [], []
+
+    async def _expand_via_ch3l3(self, entities: List[Dict]) -> tuple[List[Dict], List[Dict], List[Dict]]:
+        """
+        Expand entity graph using precomputed CH3-L3 scores with path-based traversal.
+        Uses beam search to find best paths from seed entities using cumulative scores.
+        
+        Path scoring:
+        - Product aggregation: path_score = score1 * score2 * ... * scoreN
+        - Sum aggregation: path_score = score1 + score2 + ... + scoreN
+        
+        Returns:
+            tuple: (expanded_entities, chunks, relationships)
+        """
+        if not entities:
+            return [], [], []
+        
+        try:
+            logger.debug(f"Expanding via CH3-L3 for {len(entities)} seed entities")
+            top_k_hop = self.config.top_k_hop_ch3_l3
+            max_path_length = self.config.max_path_length_ch3
+            aggregation = self.config.cum_score_aggregation
+            
+            # Track all discovered entities with their best path scores
+            # Format: {entity_name: best_cumulative_score}
+            entity_scores = {}
+            all_entity_names = set()
+            
+            # Add seed entities with score 1.0
+            for entity in entities:
+                entity_scores[entity["name"]] = 1.0
+                all_entity_names.add(entity["name"])
+            
+            # Beam search: explore paths up to max_path_length
+            # Each beam entry: (entity_name, cumulative_score, path_length)
+            beam = [(e["name"], 1.0, 0) for e in entities]
+            
+            for step in range(max_path_length):
+                next_beam = []
+                
+                for current_entity, current_score, path_len in beam:
+                    # Get CH3-L3 candidates for this entity
+                    candidates = await self.neo4j_handler.get_ch3l3_top_candidates(
+                        current_entity, top_k=top_k_hop
+                    )
+                    
+                    for candidate in candidates:
+                        node_name = candidate.get("node", "")
+                        edge_score = candidate.get("score", 0.0)
+                        
+                        if not node_name or edge_score <= 0:
+                            continue
+                        
+                        # Calculate cumulative score
+                        if aggregation == "product":
+                            new_score = current_score * edge_score
+                        else:  # sum
+                            new_score = current_score + edge_score
+                        
+                        # Update best score for this entity
+                        if node_name not in entity_scores or new_score > entity_scores[node_name]:
+                            entity_scores[node_name] = new_score
+                            all_entity_names.add(node_name)
+                        
+                        # Add to next beam if we haven't reached max path length
+                        if path_len + 1 < max_path_length:
+                            next_beam.append((node_name, new_score, path_len + 1))
+                
+                # Prune beam: keep top entries per unique entity
+                if next_beam:
+                    # Sort by score and keep best per entity
+                    next_beam.sort(key=lambda x: x[1], reverse=True)
+                    seen = set()
+                    pruned_beam = []
+                    for entry in next_beam:
+                        if entry[0] not in seen:
+                            seen.add(entry[0])
+                            pruned_beam.append(entry)
+                    beam = pruned_beam[:50]  # Limit beam width
+                else:
+                    break
+            
+            # Sort entities by their best scores and take top ones
+            sorted_entities = sorted(
+                entity_scores.items(), 
+                key=lambda x: x[1], 
+                reverse=True
+            )[:self.config.top_k_entities * 3]  # Get more than top_k for diversity
+            
+            expanded_entity_names = [name for name, _ in sorted_entities if name not in [e["name"] for e in entities]]
+            
+            # Get chunks for all expanded entities
+            chunks = await self.neo4j_handler.get_chunks_for_entities(list(all_entity_names))
+            
+            # Get relationships between expanded entities
+            relationships = await self.neo4j_handler.get_entity_relationships(list(all_entity_names))
+            
+            # Convert to list format with scores
+            expanded_list = [
+                {"name": name, "batch_time": "", "score": score, "source": "ch3l3_traversal"} 
+                for name, score in sorted_entities if name not in [e["name"] for e in entities]
+            ]
+            
+            logger.debug(f"CH3-L3 expansion: {len(expanded_list)} entities, {len(chunks)} chunks, {len(relationships)} relationships")
+            return expanded_list, chunks, relationships
+        
+        except Exception as e:
+            logger.warning(f"CH3-L3 expansion failed: {e}")
             return [], [], []
 
     async def _post_compress_chunks(self, query: str, chunks: List[Dict]) -> List[Dict]:
