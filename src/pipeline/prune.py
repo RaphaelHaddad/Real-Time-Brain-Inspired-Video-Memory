@@ -6,14 +6,17 @@ import numpy as np
 import networkx as nx
 
 class Graph:
-    def __init__(self, graph_data):
+    def __init__(self, graph_data, embedding_model=None):
         self.nodes = graph_data['nodes']
         self.node_name_list = self._get_node_name_list()
         self.relationships = graph_data['relationships']
         self.original_node_count = len(self.nodes)
         self.original_rel_count = len(self.relationships)
         self.relelation_types = self._get_relation_types()
-        self.embedding_model = SentenceTransformer('Qwen/Qwen3-Embedding-0.6B')
+        if embedding_model:
+            self.embedding_model = embedding_model
+        else:
+            self.embedding_model = SentenceTransformer('Qwen/Qwen3-Embedding-0.6B')
     def _get_node_name_list(self):
         name_list = []
         for node in self.nodes:

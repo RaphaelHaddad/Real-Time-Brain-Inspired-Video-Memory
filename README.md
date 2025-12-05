@@ -391,7 +391,7 @@ For offline retrieval, use a JSON file with the following structure:
 Run batch retrieval from a JSON input file:
 
 ```bash
-python3 -m src.cli.main batch-retrieve --config config/base_config.yaml --graph-uuid <graph-uuid> --input input_queries.json --output results.json
+python3 -m src.cli.main batch-retrieve --config config/base_config.yaml --graph-uuid <graph-uuid> --input ./data/groundtruth/retrieval_offline.json --output results.json
 ```
 
 The output will be a JSON file with the following consistent format:
@@ -439,6 +439,44 @@ python3 scripts/plot/plot_metrics.py --config config/plot_metrics.yaml
 4. The combined plot is saved to the path defined under `plot.save_path` in the config (default: `outputs/metrics_comparison.png`).
 
 This script creates one subplot per selected metric and draws one curve per JSON file so you can visually compare runs side-by-side.
+
+</details>
+
+## Automated Parameter Sweep & Analysis
+
+<details>
+<summary><strong>🔬 Full Automation Pipeline (click to expand)</strong></summary>
+
+Run automated parameter sweeps with random sampling and comprehensive analysis:
+
+### 1. Run Parameter Sweep
+
+```bash
+# Run N epochs with random parameter combinations
+python3 scripts/run_parameter_sweep.py \
+  --epochs 50 \
+  --video-path /path/to/video.mp4 \
+  --retrieval-json data/groundtruth/retrieval_offline.json \
+  --output-dir outputs/sweeps
+```
+
+Key options:
+- `--epochs`: Number of KG build + benchmark iterations (default: 10)
+- `--clear-db`: Clear Neo4j database between epochs
+- `--seed`: Random seed for reproducibility
+
+### 2. Analyze Results
+
+```bash
+# Generate statistical analysis and network science visualizations
+python3 scripts/analyze_parameter_sweep.py \
+  --input outputs/sweeps/sweep_<timestamp>/sweep_summary.json
+```
+
+This produces:
+- **Individual plots**: accuracy evolution, parameter distributions, correlations
+- **Network science figures**: small-world analysis, graph scaling, modularity
+- **`conference_figure.png`**: Publication-ready 8-panel composite figure
 
 </details>
 

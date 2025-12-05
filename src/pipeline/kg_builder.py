@@ -14,9 +14,24 @@ from ..components.global_refiner import GlobalRefiner
 from ..components.network_info import NetworkInfoProvider
 from .acs_automata import ACSAutomata
 from .retriever_hybrid import HybridRetriever
+from .prune import Graph
 from tqdm.asyncio import tqdm
+from langchain_openai import OpenAIEmbeddings
+import numpy as np
 
 logger = get_logger(__name__)
+
+class EmbedderAdapter:
+    """Adapts LangChain Embeddings to match SentenceTransformer interface expected by prune.py"""
+    def __init__(self, embedder):
+        self.embedder = embedder
+    
+    def encode(self, texts: List[str]) -> np.ndarray:
+        if not texts:
+            return np.array([])
+        # embed_documents returns List[List[float]], convert to numpy array for cosine_similarity
+        embeddings = self.embedder.embed_documents(texts)
+        return np.array(embeddings)
 
 class KGBuilder:
     def __init__(self, config: PipelineConfig):
@@ -28,6 +43,20 @@ class KGBuilder:
         self.network_info_provider = NetworkInfoProvider(self.neo4j_handler)
         self.acs_automata = ACSAutomata(self.neo4j_handler)
         self.online_retriever = None  # Initialize when needed
+
+        # Initialize pruning embedder if enabled
+        self.pruning_embedder = None
+        if getattr(config.kg, 'enable_pruning', True):
+            try:
+                base_embedder = OpenAIEmbeddings(
+                    model=getattr(config.kg, 'embedding_model', 'embedding-3'),
+                    openai_api_key=getattr(config.kg, 'embedding_api_key', ''),
+                    openai_api_base=getattr(config.kg, 'embedding_endpoint', '')
+                )
+                self.pruning_embedder = EmbedderAdapter(base_embedder)
+                logger.info("Initialized pruning embedder (OpenAI/Z AI compatible)")
+            except Exception as e:
+                logger.warning(f"Failed to initialize pruning embedder: {e}")
 
         # Initialize hierarchical extraction pipeline if enabled
         self.pre_llm_injector = None
@@ -125,6 +154,14 @@ class KGBuilder:
                 # Get network info
                 network_info_start = time.perf_counter()
                 network_info = await self.network_info_provider.get_info()
+                
+                # Fetch schema context to guide LLM against repetitive relations
+                schema_context = await self._get_schema_context()
+                if isinstance(network_info, dict):
+                    network_info['schema_summary'] = schema_context
+                elif isinstance(network_info, str):
+                    network_info += f"\n\n{schema_context}"
+                
                 network_info_time = time.perf_counter() - network_info_start
 
                 # LLM injection with hierarchical extraction
@@ -190,6 +227,17 @@ class KGBuilder:
                 # Data cleaning
                 clean_start = time.perf_counter()
                 cleaned_triplets = self._clean_data(triplets)
+                
+                # Pruning
+                if self.pruning_embedder:
+                    prune_start = time.perf_counter()
+                    before_prune = len(cleaned_triplets)
+                    # Apply pruning against both batch and existing graph
+                    cleaned_triplets = await self._apply_pruning(cleaned_triplets)
+                    prune_time = time.perf_counter() - prune_start
+                    if len(cleaned_triplets) < before_prune:
+                        logger.info(f"Pruned {before_prune - len(cleaned_triplets)} redundant triplets in {prune_time:.2f}s")
+
                 clean_time = time.perf_counter() - clean_start
 
                 # Inject into Neo4j (always create chunks now - hybrid search)
@@ -299,6 +347,121 @@ class KGBuilder:
             seen.add(key)
 
         return cleaned
+
+    async def _get_schema_context(self) -> str:
+        """Fetch summary of existing relationship types to guide LLM"""
+        try:
+            query = """
+            MATCH ()-[r]->() 
+            RETURN type(r) as rel, count(r) as c 
+            ORDER BY c DESC 
+            LIMIT 50
+            """
+            schema_lines = []
+            async with self.neo4j_handler.driver.session() as session:
+                result = await session.run(query)
+                async for record in result:
+                    schema_lines.append(f"- {record['rel']} (count: {record['c']})")
+            
+            if not schema_lines:
+                return ""
+            return "Existing Graph Schema (Common Relations):\n" + "\n".join(schema_lines)
+        except Exception as e:
+            logger.warning(f"Failed to fetch schema context: {e}")
+            return ""
+
+    async def _fetch_existing_edges(self, entities: List[str]) -> List[Dict[str, Any]]:
+        """Fetch existing edges between the given entities from Neo4j"""
+        if not entities:
+            return []
+            
+        query = """
+        MATCH (h:GraphNode)-[r]->(t:GraphNode)
+        WHERE h.name IN $names AND t.name IN $names
+        RETURN h.name as head, type(r) as relation, t.name as tail
+        """
+        
+        existing = []
+        try:
+            async with self.neo4j_handler.driver.session() as session:
+                result = await session.run(query, names=entities)
+                async for record in result:
+                    existing.append({
+                        "head": record["head"],
+                        "relation": record["relation"],
+                        "tail": record["tail"],
+                        "source_chunks": [], 
+                        "is_existing": True
+                    })
+        except Exception as e:
+            logger.warning(f"Failed to fetch existing edges for pruning: {e}")
+        
+        return existing
+
+    async def _apply_pruning(self, triplets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Apply semantic pruning using prune.py logic, considering existing graph edges"""
+        if not triplets:
+            return []
+
+        # 1. Get entities involved in new triplets
+        entities = list(set([t['head'] for t in triplets] + [t['tail'] for t in triplets]))
+        
+        # 2. Fetch existing edges between these entities
+        existing_triplets = await self._fetch_existing_edges(entities)
+        
+        # 3. Combine new and existing
+        # Mark new triplets
+        for t in triplets:
+            t['is_new'] = True
+            
+        combined_triplets = triplets + existing_triplets
+        
+        # Convert triplets to Graph format expected by prune.py
+        nodes = set()
+        relationships = []
+        
+        for t in combined_triplets:
+            nodes.add(t['head'])
+            nodes.add(t['tail'])
+            relationships.append({
+                "type": t['relation'],
+                "from_node": t['head'],
+                "to_node": t['tail'],
+                "properties": {
+                    "source_chunks": t.get("source_chunks", []),
+                    "is_new": t.get("is_new", False)
+                }
+            })
+            
+        graph_data = {
+            "nodes": [{"name": n} for n in nodes],
+            "relationships": relationships
+        }
+        logger.info("Trying PRUNING....")
+        try:
+            # Use Graph class from prune.py with our adapted embedder
+            graph = Graph(graph_data, embedding_model=self.pruning_embedder)
+            logger.info(f"BEFORE PRUNING: {len(graph_data['relationships'])} Relationships")
+            pruned_rels = graph.prune_graph()
+            logger.info(f"After PRUNING: {len(pruned_rels)} Relationships")
+            
+            # Convert back to triplets, keeping ONLY the new ones that survived
+            final_triplets = []
+            for r in pruned_rels:
+                props = r.get("properties", {})
+                if props.get("is_new", False):
+                    final_triplets.append({
+                        "head": r['from_node'],
+                        "relation": r['type'],
+                        "tail": r['to_node'],
+                        "source_chunks": props.get("source_chunks", [])
+                    })
+            
+            return final_triplets
+            
+        except Exception as e:
+            logger.error(f"Pruning failed: {e}")
+            return triplets
 
     def _record_batch_metrics(self, batch_idx: int, total_time: float, timings: Dict[str, float],
                              retrieval_metrics: List[Dict], acs_metrics: Dict[str, Any]):
