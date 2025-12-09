@@ -226,6 +226,7 @@ class Neo4jHandler:
                 chunk_index = chunk.get("index") if (isinstance(chunk.get("index"), int) or isinstance(chunk.get("index"), str)) else None
                 
                 # Create chunk node
+                original_chunk_id = chunk.get("original_chunk_id")
                 if embedding:
                     await session.run(
                         """
@@ -234,11 +235,12 @@ class Neo4jHandler:
                             c.embedding = $embedding,
                             c.created_at = datetime(),
                             c.batch_id = $batch_idx,
-                            c.embedding_model = $embedding_model
+                            c.embedding_model = $embedding_model,
+                            c.original_chunk_id = $original_chunk_id
                         """,
                         chunk_id=chunk_id, graph_uuid=self.run_uuid,
                         content=content, embedding=embedding, batch_idx=batch_idx,
-                        embedding_model=self.kg_config.embedding_model
+                        embedding_model=self.kg_config.embedding_model, original_chunk_id=original_chunk_id
                     )
                 else:
                     await session.run(
@@ -246,10 +248,11 @@ class Neo4jHandler:
                         MERGE (c:Chunk:GraphNode {id: $chunk_id, graph_uuid: $graph_uuid})
                         SET c.content = $content,
                             c.created_at = datetime(),
-                            c.batch_id = $batch_idx
+                            c.batch_id = $batch_idx,
+                            c.original_chunk_id = $original_chunk_id
                         """,
                         chunk_id=chunk_id, graph_uuid=self.run_uuid,
-                        content=content, batch_idx=batch_idx
+                        content=content, batch_idx=batch_idx, original_chunk_id=original_chunk_id
                     )
                 
                 # Link entities to this chunk
@@ -744,13 +747,14 @@ class Neo4jHandler:
 
     # ========== Community High Graph Methods ==========
 
-    async def create_chunk_questions(self, chunk_questions: Dict[str, List[str]], batch_idx: int = 0) -> int:
+    async def create_chunk_questions(self, chunk_questions: Dict[str, List[str]], batch_idx: int = 0, chunk_original_ids: Dict[str, int] = None) -> int:
         """
         Create ChunkQuestion nodes and link them to their parent Chunk nodes.
         
         Args:
             chunk_questions: Dict mapping chunk_id -> list of questions
             batch_idx: Current batch index for tracking
+            chunk_original_ids: Dict mapping chunk_id -> original_chunk_id
             
         Returns:
             Number of questions created
@@ -766,6 +770,7 @@ class Neo4jHandler:
                         question_id = f"{chunk_id}_q{q_idx}"
                         
                         # Create ChunkQuestion node and link to parent Chunk
+                        original_chunk_id = chunk_original_ids.get(chunk_id) if chunk_original_ids else None
                         await session.run(
                             """
                             MATCH (c:Chunk:GraphNode {id: $chunk_id, graph_uuid: $graph_uuid})
@@ -773,14 +778,16 @@ class Neo4jHandler:
                             SET q.question = $question,
                                 q.chunk_id = $chunk_id,
                                 q.batch_id = $batch_idx,
-                                q.created_at = datetime()
+                                q.created_at = datetime(),
+                                q.original_chunk_id = $original_chunk_id
                             MERGE (c)-[:HAS_QUESTION]->(q)
                             """,
                             chunk_id=chunk_id,
                             question_id=question_id,
                             question=question,
                             batch_idx=batch_idx,
-                            graph_uuid=self.run_uuid
+                            graph_uuid=self.run_uuid,
+                            original_chunk_id=original_chunk_id
                         )
                         created_count += 1
                 
@@ -1150,7 +1157,7 @@ class Neo4jHandler:
                     """
                     MATCH (c:Chunk:GraphNode {graph_uuid: $graph_uuid})
                     WHERE c.id IN $chunk_ids
-                    RETURN c.id AS chunk_id, c.content AS content, c.time AS chunk_time
+                    RETURN c.id AS chunk_id, c.content AS content, c.time AS chunk_time, c.original_chunk_id AS original_chunk_id
                     """,
                     graph_uuid=self.run_uuid,
                     chunk_ids=chunk_ids
@@ -1158,16 +1165,50 @@ class Neo4jHandler:
                 
                 chunks = []
                 async for record in result:
+                    original_chunk_id = record["original_chunk_id"] if "original_chunk_id" in record.keys() else None
                     chunks.append({
                         "id": record["chunk_id"],
                         "content": record["content"],
                         "time": record["chunk_time"],
+                        "original_chunk_id": original_chunk_id,
                         "source": "community_hop"
                     })
                 
                 return chunks
         except Exception as e:
             logger.error(f"Error getting chunks by IDs: {e}")
+            return []
+
+    async def get_questions_for_chunk_ids(self, chunk_ids: List[str]) -> List[Dict[str, Any]]:
+        """Return question nodes linked to the provided chunk ids."""
+        if not chunk_ids:
+            return []
+
+        try:
+            async with self.driver.session() as session:
+                result = await session.run(
+                    """
+                    MATCH (c:Chunk:GraphNode {graph_uuid: $graph_uuid})-[:HAS_QUESTION]->(q:ChunkQuestion:GraphNode)
+                    WHERE c.id IN $chunk_ids
+                    RETURN c.id AS chunk_id, c.original_chunk_id AS original_chunk_id, q.id AS question_id, q.question AS question
+                    """,
+                    graph_uuid=self.run_uuid,
+                    chunk_ids=chunk_ids
+                )
+
+                questions = []
+                async for record in result:
+                    original_chunk_id = record["original_chunk_id"] if "original_chunk_id" in record.keys() else None
+                    questions.append({
+                        "chunk_id": record["chunk_id"],
+                        "original_chunk_id": original_chunk_id,
+                        "question_id": record["question_id"],
+                        "question": record["question"]
+                    })
+
+                return questions
+        except Exception as e:
+            logger.error(f"Error getting questions for chunk ids: {e}")
             return []
 
     async def get_entities_from_chunks(self, chunk_ids: List[str]) -> List[Dict[str, Any]]:
@@ -1378,7 +1419,7 @@ class Neo4jHandler:
                     """
                     MATCH (e:Entity {graph_uuid: $graph_uuid})-[:FROM_CHUNK]->(c:Chunk {graph_uuid: $graph_uuid})
                     WHERE e.name IN $entity_names
-                    RETURN DISTINCT c.id AS chunk_id, c.content AS content, c.time AS chunk_time
+                    RETURN DISTINCT c.id AS chunk_id, c.content AS content, c.time AS chunk_time, c.original_chunk_id AS original_chunk_id
                     """,
                     graph_uuid=self.run_uuid,
                     entity_names=entity_names
@@ -1386,10 +1427,12 @@ class Neo4jHandler:
                 
                 chunks = []
                 async for record in result:
+                    original_chunk_id = record["original_chunk_id"] if "original_chunk_id" in record.keys() else None
                     chunks.append({
                         "id": record["chunk_id"],
                         "content": record["content"],
                         "time": record["chunk_time"],
+                        "original_chunk_id": original_chunk_id,
                         "source": "entity_hop"
                     })
                 

@@ -255,14 +255,16 @@ class OfflineRetriever:
         from ..components.neo4j_handler import Neo4jHandler
         self.neo4j_handler = Neo4jHandler(self.neo4j_config, self.kg_config, graph_uuid)
 
-    async def retrieve(self, query: str, graph_uuid: str, groundtruth: str = "", true_chunks: List[int] = None) -> Dict[str, Any]:
+    async def retrieve(self, query: str, graph_uuid: str, groundtruth: str = "", true_chunks: List[int] = None, expected_chunk_ids: List[int] = None, analysis_dir: Path = None) -> Dict[str, Any]:
         """Perform offline retrieval against the specified graph"""
         await self.initialize_for_graph(graph_uuid)
 
         start_time = time.perf_counter()
         try:
             # Perform the retrieval and pass true_chunks info
-            retrieval_result, reranking_performed = await self._perform_retrieval(query, true_chunks)
+            retrieval_result, reranking_performed, analysis_path = await self._perform_retrieval(
+                query, true_chunks, expected_chunk_ids, analysis_dir
+            )
             retrieval_time = time.perf_counter() - start_time
 
             if reranking_performed:
@@ -277,6 +279,9 @@ class OfflineRetriever:
                 "verbose": self.config.verbose
             }
 
+            if analysis_path:
+                result["analysis_log"] = str(analysis_path)
+
             if self.config.verbose:
                 logger.info(f"Offline retrieval details:")
                 logger.info(f"  Query: {query}")
@@ -284,6 +289,8 @@ class OfflineRetriever:
                 logger.info(f"  Graph UUID: {graph_uuid}")
                 logger.info(f"  Time: {retrieval_time:.2f}s")
                 logger.info(f"  Retrieval result: {retrieval_result}")
+                if analysis_path:
+                    logger.info(f"  Deep analysis log: {analysis_path}")
 
             return result
 
@@ -304,11 +311,41 @@ class OfflineRetriever:
             if self.neo4j_handler:
                 await self.neo4j_handler.close()
 
-    async def batch_retrieve_from_file(self, input_file_path: str, graph_uuid: str) -> List[Dict[str, Any]]:
+    async def batch_retrieve_from_file(self, input_file_path: str, graph_uuid: str, expected_chunk_json: str = None, deep_analysis_dir: str = None) -> List[Dict[str, Any]]:
         """Perform batch offline retrieval from a JSON file with consistent format"""
         try:
             with open(input_file_path, 'r', encoding='utf-8') as f:
                 queries_data = json.load(f)
+
+            # Load expected chunk mapping (query -> list[int]) if provided
+            expected_map = {}
+            analysis_dir = None
+            if expected_chunk_json:
+                try:
+                    with open(expected_chunk_json, 'r', encoding='utf-8') as ef:
+                        expected_payload = json.load(ef)
+                        items = expected_payload.get('retrieval_analysis') or []
+                        for item in items:
+                            q = item.get('query')
+                            if not q:
+                                continue
+                            ids = item.get('expected_chunk_ids') or []
+                            try:
+                                expected_map[q] = [int(x) for x in ids]
+                            except Exception:
+                                expected_map[q] = []
+
+                    timestamp = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
+                    # If caller provided a deep_analysis_dir, use that as base, else default to logs/deep_retrieval
+                    if deep_analysis_dir:
+                        analysis_dir = Path(deep_analysis_dir) / graph_uuid / timestamp
+                    else:
+                        analysis_dir = Path('logs') / 'deep_retrieval' / graph_uuid / timestamp
+                    analysis_dir.mkdir(parents=True, exist_ok=True)
+                except Exception as e:
+                    logger.warning(f"Failed to load expected_chunk_json '{expected_chunk_json}': {e}")
+                    expected_map = {}
+                    analysis_dir = None
             
             results = []
             for item in queries_data:
@@ -327,7 +364,8 @@ class OfflineRetriever:
                     except Exception:
                         parsed_true_chunks = None
 
-                result = await self.retrieve(query, graph_uuid, groundtruth, parsed_true_chunks)
+                expected_ids = expected_map.get(query)
+                result = await self.retrieve(query, graph_uuid, groundtruth, parsed_true_chunks, expected_ids, analysis_dir)
                 results.append(result)
             
             return results
@@ -335,7 +373,7 @@ class OfflineRetriever:
             logger.error(f"Error in batch offline retrieval: {str(e)}")
             return []
 
-    async def _perform_retrieval(self, query: str, true_chunks: List[int] = None) -> tuple[str, bool]:
+    async def _perform_retrieval(self, query: str, true_chunks: List[int] = None, expected_chunk_ids: List[int] = None, analysis_dir: Path = None) -> tuple[str, bool, Optional[Path]]:
         """Perform a retrieval query using the hybrid search logic, with optional true_chunks tracking"""
         hybrid = HybridRetriever(
             self.config, 
@@ -344,7 +382,7 @@ class OfflineRetriever:
             realtime_output=False,
             community_config=self.community_config
         )
-        return await hybrid._perform_hybrid_retrieval(query, true_chunks)
+        return await hybrid._perform_hybrid_retrieval(query, true_chunks, expected_chunk_ids, analysis_dir)
 
     async def _rerank_results(self, query: str, nodes: List[Dict]) -> List[Dict]:
         """Apply reranking to the retrieval results if a reranker is configured"""

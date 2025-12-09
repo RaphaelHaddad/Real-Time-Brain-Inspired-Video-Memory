@@ -14,3 +14,13 @@ injection_run.log
 docker/plugins_new/apoc-5.26.16-core.jar
 data/export_graph/pruned
 outputs
+benchmark_results_car.json
+detailed_retrieval_results.json
+.gitignore
+results_car.json
+sweep_150_epochs_deep.log
+results.json
+nohup.out
+scripts/__pycache__/run_parameter_sweep.cpython-312.pyc
+data/videos/car.mp4
+data/groundtruth/expected_chunks.json

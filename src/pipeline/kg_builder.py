@@ -165,7 +165,7 @@ class KGBuilder:
                     pre_start = time.perf_counter()
                     # Now returns 4 values including chunk_questions
                     pre_triplets, text_chunks, subgraphs, chunk_questions = await self.pre_llm_injector.extract_local_triplets(
-                        aggregated_content, network_info, self.neo4j_handler, batch_idx, self.run_uuid
+                        aggregated_content, network_info, self.neo4j_handler, batch_idx, self.run_uuid, batch
                     )
                     pre_time = time.perf_counter() - pre_start
                     logger.info(f"Pre-extraction: {len(pre_triplets)} triplets in {pre_time:.2f}s")
@@ -244,7 +244,8 @@ class KGBuilder:
                 
                 # Create chunk questions if community features enabled
                 if self._community_enabled and chunk_questions:
-                    questions_created = await self.neo4j_handler.create_chunk_questions(chunk_questions, batch_idx)
+                    chunk_original_ids = {chunk["id"]: chunk.get("original_chunk_id") for chunk in text_chunks}
+                    questions_created = await self.neo4j_handler.create_chunk_questions(chunk_questions, batch_idx, chunk_original_ids)
                     logger.info(f"Created {questions_created} ChunkQuestion nodes")
                 
                 neo4j_time = time.perf_counter() - neo4j_start

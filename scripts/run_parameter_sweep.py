@@ -83,11 +83,33 @@ COMMUNITY_SWEEP_FLOAT_PARAMETERS = [
     FloatParameterRange("community_resolution", 0.1, 2.0, ["community_high_graph", "community_resolution"]),
 ]
 
+# Global float parameters to sweep (retrieval-level floats)
+GLOBAL_SWEEP_FLOAT_PARAMETERS = [
+    # compression_threshold: cosine similarity cutoff used by post-compression.
+    # Range chosen to explore from effectively disabled compression (0.0)
+    # to moderately aggressive filtering (0.4). Default in base_config is 0.15.
+    FloatParameterRange("compression_threshold", 0.0, 0.4, ["retrieval", "compression_threshold"]),
+]
+
 # Fixed paths
-VLM_OUTPUT_PATH = "data/outputs/vlm_output.json"
-RETRIEVAL_INPUT_PATH = "data/groundtruth/retrieval_offline.json"
 MVP_METRICS_PATH = "data/metrics/mvp_93e9c82e-95d6-4864-8ac1-2ae70edfd961.json"
 PLOT_CONFIG_TEMPLATE = "config/plot_metrics.yaml"
+
+# Hop method choices for all-retrieval mode
+HOP_METHODS = ["naive", "page_rank", "ch3_l3"]
+
+
+@dataclass
+class RetrievalConfig:
+    """Configuration for a single retrieval run."""
+    community_retriever: bool
+    hop_method: str
+    top_k: int = 9
+    graph_hops: int = 2
+    top_k_hop_pagerank: int = 10
+    top_k_hop_ch3_l3: int = 4
+    max_path_length_ch3: int = 4
+    cum_score_aggregation: str = "product"
 
 
 @dataclass
@@ -104,6 +126,7 @@ class EpochResult:
     status: str = "not_started"
     error_message: Optional[str] = None
     output_folder: str = ""
+    retrieval_results: List[Dict[str, Any]] = field(default_factory=list)  # List of retrieval run results
 
 
 # ============================================================================
@@ -194,10 +217,14 @@ def sample_float_parameters() -> Dict[str, float]:
     Returns a dict mapping parameter name to float value.
     """
     params = {}
-    # Sample float parameters
+    # Sample community float parameters
     for param in COMMUNITY_SWEEP_FLOAT_PARAMETERS:
-        # Use uniform distribution for resolution/gamma
         params[param.name] = round(random.uniform(param.min_val, param.max_val), 3)
+
+    # Sample global float parameters as well
+    for param in GLOBAL_SWEEP_FLOAT_PARAMETERS:
+        params[param.name] = round(random.uniform(param.min_val, param.max_val), 3)
+
     return params
 
 
@@ -366,14 +393,27 @@ class EpochRunner:
         base_config_path: Path,
         output_base_dir: Path,
         project_root: Path,
+        vlm_output_path: Path,
+        retrieval_input_path: Path,
         log: Logger,
         dry_run: bool = False,
+        all_retrieval: bool = False,
+        comparable_all_retrieval: bool = False,
+        derive_hop_params: bool = False,
+        expected_chunk_json: Optional[Path] = None,
     ):
         self.epoch = epoch
         self.base_config_path = base_config_path
         self.project_root = project_root
+        self.vlm_output_path = vlm_output_path
+        self.retrieval_input_path = retrieval_input_path
         self.log = log
         self.dry_run = dry_run
+        self.all_retrieval = all_retrieval
+        self.comparable_all_retrieval = comparable_all_retrieval
+        self.derive_hop_params = derive_hop_params
+        self._precomputed_methods: set[str] = set()
+        self.expected_chunk_json = expected_chunk_json
         
         # Create epoch output directory
         self.epoch_dir = output_base_dir / f"epoch_{epoch:03d}"
@@ -411,13 +451,18 @@ class EpochRunner:
             if not self._step_build_kg():
                 return self.result
             
-            # Step 3: Run retrieval
-            if not self._step_run_retrieval():
-                return self.result
+            # Step 3: Run retrieval(s)
+            if self.all_retrieval:
+                if not self._step_run_all_retrievals():
+                    return self.result
+            else:
+                if not self._step_run_retrieval():
+                    return self.result
             
-            # Step 4: Run benchmark
-            if not self._step_run_benchmark():
-                return self.result
+            # Step 4: Run benchmark (only if not all_retrieval)
+            if not self.all_retrieval:
+                if not self._step_run_benchmark():
+                    return self.result
             
             # Step 5: Copy metrics and plot
             self._step_copy_metrics_and_plot()
@@ -455,6 +500,13 @@ class EpochRunner:
         # Load base config and apply parameters (core sweep params)
         config = load_yaml(self.base_config_path)
         apply_parameters_to_config(config, params)
+
+        # Sample global float sweep parameters (e.g., compression_threshold)
+        for fparam in GLOBAL_SWEEP_FLOAT_PARAMETERS:
+            sampled_val = round(random.uniform(fparam.min_val, fparam.max_val), 3)
+            set_nested_value(config, fparam.yaml_path, sampled_val)
+            params[fparam.name] = sampled_val
+            self.log.info(f"  {fparam.name}: {sampled_val} (sampled in range [{fparam.min_val}, {fparam.max_val}])")
 
     # If community_high_graph is enabled for both creator and retriever,
         # sample community-specific parameters and apply them.
@@ -504,7 +556,7 @@ class EpochRunner:
         cmd = [
             "python3", "-m", "src.cli.main", "kg",
             "--config", str(self.config_path),
-            "--vlm-output", VLM_OUTPUT_PATH,
+            "--vlm-output", str(self.vlm_output_path),
         ]
         
         returncode, stdout, stderr = run_command(
@@ -536,8 +588,235 @@ class EpochRunner:
         self.log.info(f"  KG built successfully with UUID: {uuid}")
         return True
     
+    def _step_run_all_retrievals(self) -> bool:
+        """Run multiple retrieval configurations (all hop methods, with/without community)."""
+        self.log.info("Step 3: Running all retrieval configurations...")
+        self.log.info(f"  Total configurations: 2 (community on/off) × 3 (hop methods) = 6 runs")
+        
+        if self.dry_run:
+            self.log.info("  [DRY RUN] Skipping all retrievals")
+            return True
+        
+        config_run = 0
+        # Read baseline retrieval params from the saved config for comparability
+        base_config = load_yaml(self.config_path)
+        base_top_k = get_nested_value(base_config, ["retrieval", "top_k"], 9)
+        base_graph_hops = get_nested_value(base_config, ["retrieval", "graph_hops"], 2)
+        self.log.info(f"  Baseline top_k={base_top_k}, graph_hops={base_graph_hops} (shared across runs)")
+        # First: community_retriever = False, then True
+        for community_enabled in [False, True]:
+            community_label = "community_on" if community_enabled else "community_off"
+            self.log.info(f"\n  [{community_label.upper()}] Running retrievals with community_retriever={community_enabled}")
+            
+            for hop_method in HOP_METHODS:
+                config_run += 1
+                self.log.separator("-")
+                self.log.info(f"  Run {config_run}/6: hop_method={hop_method}, {community_label}")
+                
+                # Determine retrieval parameters
+                if self.comparable_all_retrieval:
+                    retrieval_params = self._comparable_retrieval_params(
+                        hop_method, base_top_k, base_graph_hops
+                    )
+                else:
+                    retrieval_params = self._sample_retrieval_params(hop_method)
+                retrieval_config = RetrievalConfig(
+                    community_retriever=community_enabled,
+                    hop_method=hop_method,
+                    **retrieval_params
+                )
+                
+                # Create run-specific output path
+                run_output_path = self.epoch_dir / f"retrieval_results_{community_label}_{hop_method}.json"
+                run_benchmark_path = self.epoch_dir / f"benchmark_results_{community_label}_{hop_method}.json"
+                
+                # Create modified config for this run
+                run_config_path = self.epoch_dir / f"config_{community_label}_{hop_method}.yaml"
+                self._write_retrieval_config(run_config_path, retrieval_config)
+                
+                # Run retrieval
+                if not self._run_single_retrieval(run_config_path, run_output_path):
+                    self.log.warning(f"  Retrieval failed for {community_label}_{hop_method}")
+                    continue
+                
+                # Run benchmark for this retrieval
+                accuracy, total, correct = self._run_single_benchmark(run_config_path, run_output_path, run_benchmark_path)
+                
+                # Store result
+                result_entry = {
+                    "run": config_run,
+                    "community_retriever": community_enabled,
+                    "hop_method": hop_method,
+                    "parameters": asdict(retrieval_config),
+                    "accuracy": accuracy,
+                    "total_queries": total,
+                    "correct_queries": correct,
+                    "output": str(run_output_path),
+                    "benchmark": str(run_benchmark_path),
+                }
+                self.result.retrieval_results.append(result_entry)
+                
+                if accuracy is not None:
+                    self.log.info(f"    Accuracy: {accuracy:.2%} ({correct}/{total})")
+                else:
+                    self.log.warning(f"    Could not extract accuracy")
+        
+        return True
+    
+    def _comparable_retrieval_params(self, hop_method: str, base_top_k: int, base_graph_hops: int) -> Dict[str, Any]:
+        """Return retrieval params derived from shared baseline values for comparability."""
+        params: Dict[str, Any] = {}
+        if hop_method == "naive":
+            params["top_k"] = base_top_k
+            params["graph_hops"] = base_graph_hops
+        elif hop_method == "page_rank":
+            # Derive pagerank hop top_k from baseline when enabled
+            pr_top_k = base_top_k * 2 if self.derive_hop_params else max(4, base_top_k)
+            params["top_k_hop_pagerank"] = pr_top_k
+        elif hop_method == "ch3_l3":
+            ch_top_k = base_top_k if self.derive_hop_params else max(2, base_top_k)
+            max_path_len = base_graph_hops if self.derive_hop_params else max(2, base_graph_hops)
+            params["top_k_hop_ch3_l3"] = ch_top_k
+            params["max_path_length_ch3"] = max_path_len
+            params["cum_score_aggregation"] = "product"
+        return params
+
+    def _sample_retrieval_params(self, hop_method: str) -> Dict[str, Any]:
+        """Sample retrieval parameters based on hop method."""
+        params = {}
+        if hop_method == "naive":
+            params["top_k"] = random.randint(5, 30)
+            params["graph_hops"] = random.randint(2, 5)
+        elif hop_method == "page_rank":
+            params["top_k_hop_pagerank"] = random.randint(4, 20)
+        elif hop_method == "ch3_l3":
+            params["top_k_hop_ch3_l3"] = random.randint(2, 8)
+            params["max_path_length_ch3"] = random.randint(2, 8)
+            params["cum_score_aggregation"] = random.choice(["sum", "product"])
+        return params
+    
+    def _write_retrieval_config(self, config_path: Path, retrieval_config: RetrievalConfig):
+        """Write a config file with the given retrieval configuration."""
+        config = load_yaml(self.config_path)
+        
+        # Update retrieval settings
+        set_nested_value(config, ["retrieval", "hop_method"], retrieval_config.hop_method)
+        set_nested_value(config, ["community_high_graph", "community_retriever"], retrieval_config.community_retriever)
+        
+        # Set hop-method-specific parameters
+        if retrieval_config.hop_method == "naive":
+            set_nested_value(config, ["retrieval", "top_k"], retrieval_config.top_k)
+            set_nested_value(config, ["retrieval", "graph_hops"], retrieval_config.graph_hops)
+        elif retrieval_config.hop_method == "page_rank":
+            set_nested_value(config, ["retrieval", "top_k_hop_pagerank"], retrieval_config.top_k_hop_pagerank)
+        elif retrieval_config.hop_method == "ch3_l3":
+            set_nested_value(config, ["retrieval", "top_k_hop_ch3_l3"], retrieval_config.top_k_hop_ch3_l3)
+            set_nested_value(config, ["retrieval", "max_path_length_ch3"], retrieval_config.max_path_length_ch3)
+            set_nested_value(config, ["retrieval", "cum_score_aggregation"], retrieval_config.cum_score_aggregation)
+        
+        save_yaml(config, config_path)
+    
+    def _run_single_retrieval(self, config_path: Path, output_path: Path) -> bool:
+        """Run a single retrieval with the given config."""
+        
+        # Load config to check hop method
+        config = load_yaml(config_path)
+        hop_method = get_nested_value(config, ["retrieval", "hop_method"])
+        
+        # Run precomputation if needed
+        if hop_method in ["page_rank", "ch3_l3"] and hop_method not in self._precomputed_methods:
+            self.log.info(f"  Running precomputation for {hop_method}...")
+            precompute_cmd = [
+                "python3", "-m", "src.cli.main", "precompute",
+                "--config", str(config_path),
+                "--graph-uuid", self.result.graph_uuid,
+                "--methods", hop_method,
+            ]
+            
+            precompute_log = self.epoch_dir / f"precompute_{hop_method}.log"
+            returncode, stdout, stderr = run_command(
+                precompute_cmd,
+                self.log,
+                cwd=self.project_root,
+                log_file=precompute_log,
+                timeout=1800,  # 30 minutes timeout for precomputation
+            )
+            
+            if returncode != 0:
+                self.log.error(f"  Precomputation failed for {hop_method}. See log: {precompute_log}")
+                return False
+            
+            self.log.info(f"  Precomputation completed for {hop_method}")
+            self._precomputed_methods.add(hop_method)
+        
+        # Run retrieval
+        cmd = [
+            "python3", "-m", "src.cli.main", "batch-retrieve",
+            "--config", str(config_path),
+            "--graph-uuid", self.result.graph_uuid,
+            "--input", str(self.retrieval_input_path),
+            "--output", str(output_path),
+        ]
+        # If expected chunk JSON is provided, include it to enable deep analysis
+        if self.expected_chunk_json:
+            cmd.extend(["--expected-chunk-json", str(self.expected_chunk_json)])
+            # Also instruct CLI to place deep analysis under this epoch's deep_retrieval folder
+            deep_dir = self.epoch_dir / "deep_retrieval"
+            cmd.extend(["--deep-analysis-dir", str(deep_dir)])
+            # Copy expected JSON into epoch folder for traceability
+            try:
+                dst = self.epoch_dir / ("expected_chunks_" + Path(self.expected_chunk_json).name)
+                if not dst.exists():
+                    import shutil
+
+                    shutil.copy(self.expected_chunk_json, dst)
+                    self.log.info(f"  Copied expected-chunk-json to epoch folder: {dst}")
+            except Exception as e:
+                self.log.warning(f"  Could not copy expected-chunk-json to epoch dir: {e}")
+        
+        retrieval_log = self.epoch_dir / f"retrieval_{output_path.stem}.log"
+        returncode, stdout, stderr = run_command(
+            cmd,
+            self.log,
+            cwd=self.project_root,
+            log_file=retrieval_log,
+            timeout=3600,
+        )
+        
+        if returncode != 0:
+            self.log.error(f"  Retrieval failed. See log: {retrieval_log}")
+            return False
+        
+        return True
+    
+    def _run_single_benchmark(self, config_path: Path, retrieval_output: Path, benchmark_output: Path) -> Tuple[Optional[float], int, int]:
+        """Run benchmark for a single retrieval output."""
+        cmd = [
+            "python3", "-m", "src.cli.main", "benchmark",
+            "--config", str(config_path),
+            "--input", str(retrieval_output),
+            "--output", str(benchmark_output),
+        ]
+        
+        benchmark_log = self.epoch_dir / f"benchmark_{benchmark_output.stem}.log"
+        returncode, stdout, stderr = run_command(
+            cmd,
+            self.log,
+            cwd=self.project_root,
+            log_file=benchmark_log,
+            timeout=1800,
+        )
+        
+        if returncode != 0:
+            self.log.error(f"  Benchmark failed. See log: {benchmark_log}")
+            return None, 0, 0
+        
+        # Extract accuracy
+        accuracy, total, correct = extract_accuracy_from_benchmark(benchmark_output)
+        return accuracy, total, correct
+    
     def _step_run_retrieval(self) -> bool:
-        """Run batch retrieval."""
+        """Run batch retrieval (standard mode)."""
         self.log.info("Step 3: Running batch retrieval...")
         
         if self.dry_run:
@@ -548,7 +827,7 @@ class EpochRunner:
             "python3", "-m", "src.cli.main", "batch-retrieve",
             "--config", str(self.config_path),
             "--graph-uuid", self.result.graph_uuid,
-            "--input", RETRIEVAL_INPUT_PATH,
+            "--input", str(self.retrieval_input_path),
             "--output", str(self.retrieval_output_path),
         ]
         
@@ -691,15 +970,27 @@ class SweepRunner:
         base_config_path: Path,
         output_dir: Path,
         project_root: Path,
+        vlm_output_path: Path,
+        retrieval_input_path: Path,
         dry_run: bool = False,
         start_epoch: int = 1,
+        all_retrieval: bool = False,
+        comparable_all_retrieval: bool = False,
+        derive_hop_params: bool = False,
+        expected_chunk_json: Optional[Path] = None,
     ):
         self.num_epochs = num_epochs
         self.base_config_path = base_config_path
         self.output_dir = output_dir
         self.project_root = project_root
+        self.vlm_output_path = vlm_output_path
+        self.retrieval_input_path = retrieval_input_path
         self.dry_run = dry_run
         self.start_epoch = start_epoch
+        self.all_retrieval = all_retrieval
+        self.comparable_all_retrieval = comparable_all_retrieval
+        self.derive_hop_params = derive_hop_params
+        self.expected_chunk_json = expected_chunk_json
         
         # Create output directory with timestamp
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -735,8 +1026,14 @@ class SweepRunner:
                 base_config_path=self.base_config_path,
                 output_base_dir=self.sweep_dir,
                 project_root=self.project_root,
+                vlm_output_path=self.vlm_output_path,
+                retrieval_input_path=self.retrieval_input_path,
                 log=self.log,
                 dry_run=self.dry_run,
+                all_retrieval=self.all_retrieval,
+                comparable_all_retrieval=self.comparable_all_retrieval,
+                derive_hop_params=self.derive_hop_params,
+                expected_chunk_json=self.expected_chunk_json,
             )
             
             result = runner.run()
@@ -872,6 +1169,39 @@ Examples:
         default=None,
         help="Random seed for reproducibility",
     )
+    parser.add_argument(
+        "--vlm-output",
+        type=str,
+        default="data/outputs/vlm_output.json",
+        help="Path to VLM output JSON file (default: data/outputs/vlm_output.json)",
+    )
+    parser.add_argument(
+        "--retrieval-input",
+        type=str,
+        default="data/groundtruth/retrieval_offline.json",
+        help="Path to retrieval groundtruth JSON file (default: data/groundtruth/retrieval_offline.json)",
+    )
+    parser.add_argument(
+        "--expected-chunk-json",
+        type=str,
+        default=None,
+        help="(Optional) JSON file with expected chunk ids per query for deep analysis",
+    )
+    parser.add_argument(
+        "--all-retrieval",
+        action="store_true",
+        help="Run all retrieval configurations: 2 community modes × 3 hop methods = 6 retrievals per KG build",
+    )
+    parser.add_argument(
+        "--comparable-all-retrieval",
+        action="store_true",
+        help="Share baseline retrieval params across all six runs per epoch; vary only hop-specific knobs",
+    )
+    parser.add_argument(
+        "--derive-hop-params",
+        action="store_true",
+        help="Enable optional derivations: pagerank top_k ≈ 2×top_k_entities; ch3_l3 top_k ≈ top_k_entities; max_path_length_ch3 ≈ graph_hops",
+    )
     
     args = parser.parse_args()
     
@@ -890,14 +1220,33 @@ Examples:
         print(f"Error: Config file not found: {base_config_path}")
         sys.exit(1)
     
+    # Validate retrieval input exists
+    retrieval_input = project_root / args.retrieval_input
+    if not retrieval_input.exists():
+        print(f"Error: Retrieval input file not found: {retrieval_input}")
+        sys.exit(1)
+
+    expected_chunk_json = None
+    if args.expected_chunk_json:
+        expected_chunk_json = project_root / args.expected_chunk_json
+        if not expected_chunk_json.exists():
+            print(f"Error: expected-chunk-json file not found: {expected_chunk_json}")
+            sys.exit(1)
+    
     # Run sweep
     runner = SweepRunner(
         num_epochs=args.epochs,
         base_config_path=base_config_path,
         output_dir=output_dir,
         project_root=project_root,
+        vlm_output_path=Path(args.vlm_output),
+        retrieval_input_path=retrieval_input,
         dry_run=args.dry_run,
         start_epoch=args.start_epoch,
+        all_retrieval=args.all_retrieval,
+        comparable_all_retrieval=args.comparable_all_retrieval,
+        derive_hop_params=args.derive_hop_params,
+        expected_chunk_json=expected_chunk_json,
     )
     
     try:

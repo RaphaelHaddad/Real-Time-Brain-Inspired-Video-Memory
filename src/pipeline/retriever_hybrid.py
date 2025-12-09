@@ -8,6 +8,7 @@ import asyncio
 import time
 import json
 import httpx
+import re
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from ..core.config import RetrievalConfig, CommunityHighGraphConfig
@@ -122,7 +123,7 @@ class HybridRetriever:
                 
                 query_start = time.perf_counter()
                 try:
-                    retrieval_result, _ = await self._perform_hybrid_retrieval(query, parsed_true_chunks)
+                    retrieval_result, _, _ = await self._perform_hybrid_retrieval(query, parsed_true_chunks)
                     query_time = time.perf_counter() - query_start
                     
                     result = {
@@ -145,7 +146,7 @@ class HybridRetriever:
 
         return results
 
-    async def _perform_hybrid_retrieval(self, query: str, true_chunks: Optional[List[int]] = None) -> tuple[str, bool]:
+    async def _perform_hybrid_retrieval(self, query: str, true_chunks: Optional[List[int]] = None, expected_chunk_ids: Optional[List[int]] = None, analysis_dir: Optional[Path] = None) -> tuple[str, bool, Optional[Path]]:
         """
         Perform hybrid retrieval:
         1. Vector search on chunks (top_k_chunks) or skip if entity_first
@@ -163,24 +164,39 @@ class HybridRetriever:
             logger.debug(f"Starting hybrid retrieval for query: '{query}'")
             retrieval_start = time.perf_counter()
             reranking_performed = False
+            analysis_path = None
+
+            # Initialize deep analysis container if requested
+            deep_analysis = None
+            if analysis_dir and expected_chunk_ids:
+                deep_analysis = {
+                    "query": query,
+                    "expected_chunk_ids": expected_chunk_ids,
+                    "stages": {}
+                }
             
             # Check if community retrieval is enabled
             use_community_retrieval = (
                 self.community_config and 
                 self.community_config.community_retriever
             )
+            community_traversal_seed = getattr(self.community_config, 'community_traversal_seed', 'chunk_node') if self.community_config else 'entity_node'
+            
+            # Add traversal seed strategy to deep analysis
+            if deep_analysis is not None:
+                deep_analysis["traversal_seed_type"] = community_traversal_seed if use_community_retrieval else "entity_node"
             
             async with self.neo4j_handler.driver.session() as session:
                 # Step 1: Parallel vector + fulltext search (skip vector if entity_first or using community)
                 chunk_search_start = time.perf_counter()
+                questions = []
                 
                 if use_community_retrieval:
                     # Community-based retrieval: search CommunitySummary nodes first
-                    logger.info("🏘️ Using community-based retrieval")
-                    chunk_results, entity_results, community_results = await self._perform_community_retrieval(query)
-                    search_time = time.perf_counter() - chunk_search_start
-                    logger.debug(f"Community search complete: {len(chunk_results)} chunks, {len(entity_results)} entities, "
-                                f"{len(community_results)} communities in {search_time:.3f}s")
+                    logger.info(f"🏘️ Using community-based retrieval (seed from: {community_traversal_seed})")
+                    chunk_results, entity_results, community_results, questions, community_info = await self._perform_community_retrieval(
+                        query, expected_chunk_ids, collect_questions=bool(deep_analysis)
+                    )
                 elif self.config.entity_first:
                     chunk_results = []
                     entity_results = await self._fulltext_search_entities(session, query)
@@ -193,6 +209,57 @@ class HybridRetriever:
                     community_results = []
                 search_time = time.perf_counter() - chunk_search_start
                 logger.debug(f"Search complete: {len(chunk_results)} chunks, {len(entity_results)} entities in {search_time:.3f}s")
+
+                if deep_analysis is not None:
+                    if use_community_retrieval:
+                        if community_info:
+                            community_rank_dict, chunk_to_comm = community_info
+                            chunk_ranks = []
+                            expected_chunk_communities = {}  # Track communities for expected chunks
+                            for expected in expected_chunk_ids:
+                                comm_id = chunk_to_comm.get(expected)
+                                rank = community_rank_dict.get(comm_id) if comm_id else None
+                                chunk_ranks.append({
+                                    "expected_chunk_id": expected,
+                                    "rank": rank,
+                                    "chunk_id": None,
+                                    "source": "community_rank" if rank else None
+                                })
+                                if comm_id:
+                                    expected_chunk_communities[expected] = comm_id
+                        else:
+                            chunk_ranks = self._rank_expected_chunks(chunk_results or [], expected_chunk_ids)
+                            expected_chunk_communities = {}
+                        
+                        # Build community descriptions
+                        community_descriptions = []
+                        for cs in community_results:
+                            community_descriptions.append({
+                                "community_id": cs.get('community_id'),
+                                "score": cs.get('score'),
+                                "description": cs.get('content'),
+                                "num_chunks": len(cs.get('member_chunk_ids', []))
+                            })
+                        
+                        # Fetch aggregated questions for communities of expected chunks
+                        expected_chunk_questions = await self._get_community_questions_for_expected_chunks(expected_chunk_communities)
+                        
+                        # Collect seed chunk IDs (from community expansion)
+                        seed_chunk_ids = [c.get("id") for c in chunk_results] if chunk_results else []
+                        
+                        deep_analysis["stages"]["community_search"] = {
+                            "communities_returned": len(community_results),
+                            "retrieved_communities": community_descriptions,
+                            "chunk_ranks": chunk_ranks,
+                            "seed_chunk_ids": seed_chunk_ids,
+                            "seed_type": community_traversal_seed,
+                            "expected_chunk_community_questions": expected_chunk_questions,
+                            "question_hits": self._collect_question_hits(questions, expected_chunk_ids)
+                        }
+                    else:
+                        deep_analysis["stages"]["vector_search"] = {
+                            "chunk_ranks": self._rank_expected_chunks(chunk_results or [], expected_chunk_ids)
+                        }
 
                 # If true_chunks provided: compute initial vector rankings for them
                 if true_chunks:
@@ -222,18 +289,35 @@ class HybridRetriever:
                     except Exception as e:
                         logger.debug(f"Failed to compute initial true_chunks rankings: {e}")
                 
-                # Step 2: Graph traversal from top entities
+                # Step 2: Graph traversal (from entities or chunks depending on community_traversal_seed)
                 graph_start = time.perf_counter()
-                expanded_entities, traversal_chunks, traversal_relationships = await self._expand_entity_graph_with_chunks(session, entity_results)
+                if use_community_retrieval and community_traversal_seed == 'chunk_node':
+                    # Seed traversal from community-derived chunks (skip entity collection)
+                    logger.debug("🔗 Seeding traversal from community chunk nodes")
+                    expanded_entities, traversal_chunks, traversal_relationships = await self._expand_chunk_graph_with_chunks(session, chunk_results)
+                else:
+                    # Seed traversal from entities (standard path)
+                    expanded_entities, traversal_chunks, traversal_relationships = await self._expand_entity_graph_with_chunks(session, entity_results)
                 graph_time = time.perf_counter() - graph_start
                 logger.debug(f"Graph expansion: {len(expanded_entities)} entities, {len(traversal_chunks)} chunks, {len(traversal_relationships)} relationships after {self.config.graph_hops} hops in {graph_time:.3f}s")
+
+                if deep_analysis is not None:
+                    deep_analysis["stages"]["graph_traversal"] = {
+                        "chunk_ranks": self._rank_expected_chunks(traversal_chunks or [], expected_chunk_ids)
+                    }
                 
                 # Step 3: Post-compression (if enabled and not entity_first)
+                # NOTE: When using chunk-seeded traversal, skip post-compression on seed chunks
+                # to preserve community selections; only compress non-seed chunks if needed
                 if self.config.post_compression and chunk_results and not self.config.entity_first:
-                    compress_start = time.perf_counter()
-                    chunk_results = await self._post_compress_chunks(query, chunk_results)
-                    compress_time = time.perf_counter() - compress_start
-                    logger.debug(f"Post-compression: {len(chunk_results)} chunks retained in {compress_time:.3f}s")
+                    if use_community_retrieval and community_traversal_seed == 'chunk_node':
+                        # Don't post-compress community seed chunks; they're already selected
+                        logger.debug("Skipping post-compression for community seed chunks (chunk-seeded traversal enabled)")
+                    else:
+                        compress_start = time.perf_counter()
+                        chunk_results = await self._post_compress_chunks(query, chunk_results)
+                        compress_time = time.perf_counter() - compress_start
+                        logger.debug(f"Post-compression: {len(chunk_results)} chunks retained in {compress_time:.3f}s")
                 
                 # Step 4: Reranking
                 if self.config.rerank_after_traversal:
@@ -293,17 +377,35 @@ class HybridRetriever:
                         logger.debug(f"Failed to compute final true_chunks rankings: {e}")
 
                 result_text = self._format_retrieval_results(query, result_chunks, expanded_entities, traversal_relationships)
+
+                if deep_analysis is not None:
+                    # Track seed chunks in final results for chunk-seeded traversal
+                    seed_chunk_ids_set = set()
+                    if use_community_retrieval and community_traversal_seed == 'chunk_node' and chunk_results:
+                        seed_chunk_ids_set = {c.get("id") for c in chunk_results if isinstance(c, dict)}
+                    
+                    final_chunks_with_seed_info = []
+                    for chunk in (result_chunks or []):
+                        chunk_copy = dict(chunk)
+                        chunk_copy["is_seed"] = chunk.get("id") in seed_chunk_ids_set
+                        final_chunks_with_seed_info.append(chunk_copy)
+                    
+                    deep_analysis["stages"]["final"] = {
+                        "chunk_ranks": self._rank_expected_chunks(final_chunks_with_seed_info or [], expected_chunk_ids),
+                        "seed_chunk_ids_in_final": list(seed_chunk_ids_set)
+                    }
+                    analysis_path = self._write_deep_analysis(deep_analysis, analysis_dir, query)
                 
                 total_time = time.perf_counter() - retrieval_start
                 logger.debug(f"Total retrieval time: {total_time:.3f}s")
-                return result_text, reranking_performed
+                return result_text, reranking_performed, analysis_path
 
         except RerankerError:
             # Reranker failure when strict mode is enabled should be raised to the caller
             raise
         except Exception as e:
             logger.error(f"Hybrid retrieval error: {str(e)}")
-            return f"Retrieval failed: {str(e)}", False
+            return f"Retrieval failed: {str(e)}", False, None
 
     async def _vector_search_chunks(self, session, query: str) -> List[Dict[str, Any]]:
         """Vector similarity search on chunk embeddings"""
@@ -320,7 +422,7 @@ class HybridRetriever:
                 WHERE c.embedding IS NOT NULL
                 WITH c, vector.similarity.cosine(c.embedding, $query_embedding) AS similarity
                 WHERE similarity > 0.3
-                RETURN c.id AS chunk_id, c.time AS chunk_time, c.content AS content, similarity AS score
+                RETURN c.id AS chunk_id, c.time AS chunk_time, c.content AS content, c.original_chunk_id AS original_chunk_id, similarity AS score
                 ORDER BY score DESC
                 LIMIT $limit
                 """,
@@ -331,10 +433,12 @@ class HybridRetriever:
             
             chunks = []
             async for record in result:
+                original_chunk_id = record["original_chunk_id"] if "original_chunk_id" in record.keys() else None
                 chunks.append({
                     "id": record["chunk_id"],
                     "time": record["chunk_time"],
                     "content": record["content"],
+                    "original_chunk_id": original_chunk_id,
                     "score": float(record["score"]),
                     "source": "vector"
                 })
@@ -346,18 +450,58 @@ class HybridRetriever:
             logger.warning(f"Vector search failed: {e}")
             return []
 
-    async def _perform_community_retrieval(self, query: str) -> tuple[List[Dict], List[Dict], List[Dict]]:
+    async def _get_community_questions_for_expected_chunks(self, expected_chunk_communities: Dict[int, str]) -> Dict[int, List[str]]:
+        """
+        Fetch aggregated questions for each unique community of expected chunks.
+        
+        Args:
+            expected_chunk_communities: Dict mapping expected_chunk_id -> community_id
+            
+        Returns:
+            Dict mapping expected_chunk_id -> list of aggregated questions from its community
+        """
+        if not expected_chunk_communities:
+            return {}
+        
+        try:
+            result_dict = {}
+            unique_communities = set(expected_chunk_communities.values())
+            
+            async with self.neo4j_handler.driver.session() as session:
+                for comm_id in unique_communities:
+                    result = await session.run(
+                        """
+                        MATCH (cs:CommunitySummary {community_id: $comm_id, graph_uuid: $g})
+                        RETURN cs.question_chunks AS questions
+                        """,
+                        comm_id=comm_id,
+                        g=self.neo4j_handler.run_uuid
+                    )
+                    async for record in result:
+                        questions = record['questions'] or []
+                        # Map this community to all expected chunks that belong to it
+                        for exp_chunk_id, c_id in expected_chunk_communities.items():
+                            if c_id == comm_id:
+                                result_dict[exp_chunk_id] = questions
+            
+            return result_dict
+        except Exception as e:
+            logger.warning(f"Error fetching community questions for expected chunks: {e}")
+            return {}
+
+    async def _perform_community_retrieval(self, query: str, expected_chunk_ids: Optional[List[int]] = None, collect_questions: bool = False) -> tuple[List[Dict], List[Dict], List[Dict], List[Dict], Optional[tuple[Dict[str, int], Dict[int, str]]]]:
         """
         Perform community-based retrieval:
         1. Vector search on CommunitySummary descriptions
         2. Hop from top communities to their member chunks
         3. Get entities connected to those chunks
-        
+
         NOTE: Community summaries themselves are returned separately and NOT included in reranking.
         Only chunks and entities from the community hop are reranked.
-        
+
         Returns:
-            tuple: (chunks, entities, community_summaries)
+            tuple: (chunks, entities, community_summaries, questions, community_info)
+            where community_info is (community_rank_dict, chunk_to_comm) if expected_chunk_ids else None
         """
         try:
             logger.info(f"🏘️ Community retrieval for query: '{query}'")
@@ -374,12 +518,39 @@ class HybridRetriever:
             
             if not community_summaries:
                 logger.info("No community summaries found, falling back to standard retrieval")
-                return [], [], []
+                return [], [], [], [], None
             
             logger.info(f"Found {len(community_summaries)} relevant communities")
             for i, cs in enumerate(community_summaries[:3], 1):
                 logger.debug(f"  Community {i}: {cs['community_id']} (score: {cs['score']:.3f}) - "
                             f"{len(cs['member_chunk_ids'])} chunks")
+            
+            # If expected_chunk_ids provided, get all community summaries for ranking
+            community_info = None
+            if expected_chunk_ids:
+                all_community_summaries = await self.neo4j_handler.vector_search_community_summaries(
+                    query_embedding=query_embedding,
+                    top_k=1000,  # large number to get all
+                    min_similarity=0.0
+                )
+                community_rank_dict = {cs['community_id']: i+1 for i, cs in enumerate(all_community_summaries, 1)}
+                
+                # Get chunk to community mapping for expected chunks
+                async with self.neo4j_handler.driver.session() as session:
+                    result = await session.run(
+                        """
+                        MATCH (c:Chunk {graph_uuid: $g})
+                        WHERE c.original_chunk_id IN $ocids
+                        RETURN c.original_chunk_id AS ocid, c.community_id AS comm_id
+                        """,
+                        g=self.neo4j_handler.run_uuid,
+                        ocids=expected_chunk_ids
+                    )
+                    chunk_to_comm = {}
+                    async for record in result:
+                        chunk_to_comm[record['ocid']] = record['comm_id']
+                
+                community_info = (community_rank_dict, chunk_to_comm)
             
             # Step 3: Collect all member chunk IDs from top communities
             all_chunk_ids = []
@@ -404,12 +575,18 @@ class HybridRetriever:
             # Step 5: Get entities connected to these chunks
             entities = await self.neo4j_handler.get_entities_from_chunks(unique_chunk_ids)
             logger.debug(f"Retrieved {len(entities)} entities from community chunks")
+
+            # Optionally collect question nodes for analysis
+            questions = []
+            if collect_questions and unique_chunk_ids:
+                questions = await self.neo4j_handler.get_questions_for_chunk_ids(unique_chunk_ids)
+                logger.debug(f"Retrieved {len(questions)} question nodes from community chunks")
             
-            return chunks, entities, community_summaries
+            return chunks, entities, community_summaries, questions, community_info
             
         except Exception as e:
             logger.error(f"Community retrieval failed: {e}")
-            return [], [], []
+            return [], [], [], []
 
     async def _fulltext_search_entities(self, session, query: str) -> List[Dict[str, Any]]:
         """Fulltext search on entity names"""
@@ -481,6 +658,160 @@ class HybridRetriever:
             logger.warning(f"Graph expansion failed: {e}")
             return []
 
+    async def _expand_chunk_graph_with_chunks(self, session, chunks: List[Dict], hops: int = None) -> tuple[List[Dict], List[Dict], List[Dict]]:
+        """
+        Expand chunk graph by seeding from chunk nodes.
+        Traverses from chunks → entities → chunks to discover related chunks.
+        Uses the configured hop_method (naive BFS, page_rank, or ch3_l3).
+        
+        Args:
+            session: Neo4j session
+            chunks: List of chunk dicts with 'id', 'content', etc.
+            hops: Number of hops (defaults to config.graph_hops)
+        
+        Returns:
+            tuple: (expanded_entities, traversal_chunks, relationships) from traversal
+        """
+        hop_method = self.config.hop_method
+        logger.info(f"🔍 Using hop method (chunk-seeded): {hop_method}")
+        
+        if hop_method == "page_rank":
+            return await self._expand_chunks_via_pagerank(chunks)
+        elif hop_method == "ch3_l3":
+            return await self._expand_chunks_via_ch3l3(chunks)
+        else:
+            # Default: naive BFS traversal from chunks
+            return await self._expand_chunk_graph_naive(session, chunks, hops)
+
+    async def _expand_chunk_graph_naive(self, session, chunks: List[Dict], hops: int = None) -> tuple[List[Dict], List[Dict], List[Dict]]:
+        """
+        Expand chunk graph via naive BFS: start from chunk nodes, traverse to entities, then to related chunks.
+        """
+        if not chunks or not hops:
+            hops = self.config.graph_hops
+        
+        try:
+            logger.debug(f"Expanding chunk graph with {hops} hops (naive BFS from chunks)")
+            expanded_entities = set()
+            traversal_chunks = set()
+            traversal_relationships = set()
+            seen_chunk_ids = set()
+            
+            # Add seed chunks to seen set (avoid re-adding them as traversal results)
+            for chunk in chunks:
+                if isinstance(chunk, dict):
+                    seen_chunk_ids.add(chunk.get("id"))
+            
+            for chunk in chunks:
+                chunk_id = chunk.get("id") if isinstance(chunk, dict) else chunk
+                
+                # Traverse from this chunk: Chunk -> Entity -> related nodes
+                result = await session.run(
+                    """
+                    MATCH (c:Chunk {id: $chunk_id, graph_uuid: $graph_uuid})
+                    MATCH (c)-[r]-(related)
+                    WHERE related.graph_uuid = $graph_uuid
+                    RETURN DISTINCT 
+                        related.name AS related_name, 
+                        related.id AS related_id,
+                        related.batch_time AS related_batch_time,
+                        labels(related) AS related_labels,
+                        type(r) AS rel_type,
+                        startNode(r).name AS start_name,
+                        endNode(r).name AS end_name,
+                        properties(r) AS rel_props
+                    LIMIT 100
+                    """,
+                    chunk_id=chunk_id,
+                    graph_uuid=self.neo4j_handler.run_uuid
+                )
+                
+                async for record in result:
+                    related_labels = record["related_labels"]
+                    
+                    if "Entity" in related_labels:
+                        # Found an entity connected to the chunk
+                        expanded_entities.add((record["related_name"], record["related_batch_time"] or ""))
+                        
+                        # Now traverse from this entity to find other chunks
+                        entity_name = record["related_name"]
+                        entity_result = await session.run(
+                            """
+                            MATCH (e:Entity {name: $entity_name, graph_uuid: $graph_uuid})
+                            MATCH (e)-[r2]-(chunk2:Chunk)
+                            WHERE chunk2.graph_uuid = $graph_uuid
+                            RETURN DISTINCT 
+                                chunk2.id AS chunk_id, 
+                                chunk2.content AS content, 
+                                chunk2.time AS time,
+                                chunk2.original_chunk_id AS original_chunk_id
+                            LIMIT 50
+                            """,
+                            entity_name=entity_name,
+                            graph_uuid=self.neo4j_handler.run_uuid
+                        )
+                        
+                        async for entity_record in entity_result:
+                            related_chunk_id = entity_record["chunk_id"]
+                            # Avoid re-adding seed chunks
+                            if related_chunk_id not in seen_chunk_ids:
+                                seen_chunk_ids.add(related_chunk_id)
+                                traversal_chunks.add((
+                                    related_chunk_id,
+                                    entity_record["content"],
+                                    entity_record["time"],
+                                    entity_record["original_chunk_id"]
+                                ))
+                    
+                    elif "Chunk" in related_labels:
+                        # Direct chunk-to-chunk relationship
+                        related_chunk_id = record["related_id"]
+                        if related_chunk_id not in seen_chunk_ids:
+                            seen_chunk_ids.add(related_chunk_id)
+                            chunk_result = await session.run(
+                                """
+                                MATCH (c:Chunk {id: $chunk_id, graph_uuid: $graph_uuid})
+                                RETURN c.content AS content, c.time AS time, c.original_chunk_id AS original_chunk_id
+                                """,
+                                chunk_id=related_chunk_id,
+                                graph_uuid=self.neo4j_handler.run_uuid
+                            )
+                            async for chunk_record in chunk_result:
+                                traversal_chunks.add((
+                                    related_chunk_id,
+                                    chunk_record["content"],
+                                    chunk_record["time"],
+                                    chunk_record["original_chunk_id"] if "original_chunk_id" in chunk_record.keys() else None
+                                ))
+                    
+                    # Collect relationships
+                    rel_desc = f"{record['start_name']} -[{record['rel_type']}]-> {record['end_name']}"
+                    traversal_relationships.add(rel_desc)
+            
+            # Convert to lists
+            expanded_list = [{"name": n, "batch_time": t, "source": "graph_traversal"} for n, t in expanded_entities]
+            chunks_list = [{"id": cid, "content": content, "time": time, "original_chunk_id": ocid, "source": "graph_traversal"} for cid, content, time, ocid in traversal_chunks]
+            relationships_list = [{"description": desc, "source": "graph_traversal"} for desc in traversal_relationships]
+            
+            logger.debug(f"Chunk graph expansion found {len(expanded_list)} entities, {len(chunks_list)} chunks, {len(relationships_list)} relationships")
+            return expanded_list, chunks_list, relationships_list
+        
+        except Exception as e:
+            logger.warning(f"Chunk graph expansion failed: {e}")
+            return [], [], []
+
+    async def _expand_chunks_via_pagerank(self, chunks: List[Dict]) -> tuple[List[Dict], List[Dict], List[Dict]]:
+        """Expand chunk graph using PageRank by treating chunks as starting points."""
+        logger.debug("PageRank expansion from chunks not yet implemented; falling back to empty results")
+        # TODO: implement if PageRank is used with chunk-seeded traversal
+        return [], [], []
+
+    async def _expand_chunks_via_ch3l3(self, chunks: List[Dict]) -> tuple[List[Dict], List[Dict], List[Dict]]:
+        """Expand chunk graph using CH3-L3 by treating chunks as starting points."""
+        logger.debug("CH3-L3 expansion from chunks not yet implemented; falling back to empty results")
+        # TODO: implement if CH3-L3 is used with chunk-seeded traversal
+        return [], [], []
+
     async def _expand_entity_graph_with_chunks(self, session, entities: List[Dict], hops: int = None) -> tuple[List[Dict], List[Dict], List[Dict]]:
         """
         Expand entity graph based on configured hop_method.
@@ -509,22 +840,22 @@ class HybridRetriever:
             traversal_relationships = set()
             
             for entity in entities:
-                # Traverse relationships from this entity, collecting entities, chunks, and relationships
+                # Simple 1-hop expansion to avoid hanging on large graphs
                 result = await session.run(
-                    f"""
-                    MATCH (e:Entity {{name: $entity_name, graph_uuid: $graph_uuid}})
-                    MATCH path = (e)-[*1..{hops}]-(related)
+                    """
+                    MATCH (e:Entity {name: $entity_name, graph_uuid: $graph_uuid})
+                    MATCH (e)-[r]-(related)
                     WHERE related.graph_uuid = $graph_uuid
-                    UNWIND relationships(path) AS rel
                     RETURN DISTINCT 
                         related.name AS related_name, 
                         related.id AS related_id,
                         related.batch_time AS related_batch_time,
                         labels(related) AS related_labels,
-                        type(rel) AS rel_type,
-                        startNode(rel).name AS start_name,
-                        endNode(rel).name AS end_name,
-                        properties(rel) AS rel_props
+                        type(r) AS rel_type,
+                        startNode(r).name AS start_name,
+                        endNode(r).name AS end_name,
+                        properties(r) AS rel_props
+                    LIMIT 50
                     """,
                     entity_name=entity["name"],
                     graph_uuid=self.neo4j_handler.run_uuid
@@ -539,7 +870,7 @@ class HybridRetriever:
                         chunk_result = await session.run(
                             """
                             MATCH (c:Chunk {id: $chunk_id, graph_uuid: $graph_uuid})
-                            RETURN c.content AS content, c.time AS time
+                            RETURN c.content AS content, c.time AS time, c.original_chunk_id AS original_chunk_id
                             """,
                             chunk_id=record["related_id"],
                             graph_uuid=self.neo4j_handler.run_uuid
@@ -548,7 +879,8 @@ class HybridRetriever:
                             traversal_chunks.add((
                                 record["related_id"],
                                 chunk_record["content"],
-                                chunk_record["time"]
+                                chunk_record["time"],
+                                chunk_record["original_chunk_id"] if "original_chunk_id" in chunk_record.keys() else None
                             ))
                     
                     # Collect relationships
@@ -557,7 +889,7 @@ class HybridRetriever:
             
             # Convert to lists
             expanded_list = [{"name": n, "batch_time": t, "source": "graph_traversal"} for n, t in expanded_entities]
-            chunks_list = [{"id": cid, "content": content, "time": time, "source": "graph_traversal"} for cid, content, time in traversal_chunks]
+            chunks_list = [{"id": cid, "content": content, "time": time, "original_chunk_id": ocid, "source": "graph_traversal"} for cid, content, time, ocid in traversal_chunks]
             relationships_list = [{"description": desc, "source": "graph_traversal"} for desc in traversal_relationships]
             
             logger.debug(f"Graph expansion found {len(expanded_list)} entities, {len(chunks_list)} chunks, {len(relationships_list)} relationships")
@@ -956,6 +1288,73 @@ class HybridRetriever:
             return f"No results found for query '{query}'"
         
         return f"Found results for '{query}':\n" + "\n".join(parts)
+
+    def _rank_expected_chunks(self, chunks: List[Dict], expected_chunk_ids: List[int]) -> List[Dict[str, Any]]:
+        """Compute ranking (1-based) of expected chunk ids within an ordered chunk list."""
+        ranks = []
+        if not expected_chunk_ids:
+            return ranks
+
+        def _parse_id(chunk_entry: Dict[str, Any]) -> Optional[int]:
+            if chunk_entry is None:
+                return None
+            ocid = chunk_entry.get("original_chunk_id")
+            if isinstance(ocid, int):
+                return ocid
+            try:
+                cid = str(chunk_entry.get("id", ""))
+                tail = cid.split('_')[-1]
+                return int(tail)
+            except Exception:
+                return None
+
+        for expected in expected_chunk_ids:
+            hit = {"expected_chunk_id": expected, "rank": None, "chunk_id": None, "source": None}
+            for pos, chunk in enumerate(chunks, start=1):
+                parsed = _parse_id(chunk)
+                if parsed == expected:
+                    hit["rank"] = pos
+                    hit["chunk_id"] = chunk.get("id")
+                    hit["source"] = chunk.get("source")
+                    break
+            ranks.append(hit)
+        return ranks
+
+    def _collect_question_hits(self, questions: List[Dict[str, Any]], expected_chunk_ids: List[int]) -> List[Dict[str, Any]]:
+        """Summarize question nodes tied to expected chunks (no ranking available)."""
+        hits = []
+        if not expected_chunk_ids or not questions:
+            return hits
+
+        for q in questions:
+            try:
+                ocid = q.get("original_chunk_id")
+                if ocid is None:
+                    cid = str(q.get("chunk_id", ""))
+                    ocid = int(cid.split('_')[-1]) if '_' in cid else None
+            except Exception:
+                ocid = None
+
+            if ocid in expected_chunk_ids:
+                hits.append({
+                    "chunk_id": q.get("chunk_id"),
+                    "question_id": q.get("question_id"),
+                    "original_chunk_id": ocid,
+                    "question": q.get("question")
+                })
+        return hits
+
+    def _write_deep_analysis(self, analysis: Dict[str, Any], analysis_dir: Path, query: str) -> Optional[Path]:
+        """Persist deep analysis JSON and return path."""
+        try:
+            safe_name = re.sub(r"[^a-zA-Z0-9_-]+", "_", query).strip("_") or "query"
+            file_path = analysis_dir / f"{safe_name[:80]}.json"
+            analysis_dir.mkdir(parents=True, exist_ok=True)
+            file_path.write_text(json.dumps(analysis, indent=2))
+            return file_path
+        except Exception as e:
+            logger.warning(f"Failed to write deep analysis log: {e}")
+            return None
 
     async def close(self):
         """Close retriever"""

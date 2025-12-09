@@ -101,6 +101,7 @@ benchmark_llm:
 community_high_graph:
   community_creator: true  # Enable community-aware KG building with question generation
   community_retriever: true  # Enable community-based retrieval (similarity on CommunitySummary nodes)
+  community_traversal_seed: chunk_node  # 'chunk_node' (default): seed traversal from community chunks; 'entity_node': seed from entities
   question_per_chunk: 2  # Number of questions to generate per chunk
   frequency_incremental_leiden: 5  # Run Leiden community detection every N batches
   community_resolution: 1.0  # Gamma parameter for Leiden algorithm resolution

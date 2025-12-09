@@ -75,7 +75,7 @@ class PreLLMInjector:
         return " ".join(words[:max_words]) + "..."
 
     async def extract_local_triplets(
-        self, content: str, network_info: str = "", neo4j_handler = None, batch_idx: int = 0, run_uuid: str = ""
+        self, content: str, network_info: str = "", neo4j_handler = None, batch_idx: int = 0, run_uuid: str = "", batch_data: List[Dict] = None
     ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, str], Dict[str, List[str]]]:
         """
         Extract triplets from content using hierarchical chunking + local extraction.
@@ -87,6 +87,7 @@ class PreLLMInjector:
             neo4j_handler: Handler for graph operations (similarity search)
             batch_idx: Current batch index
             run_uuid: Unique identifier for the run
+            batch_data: List of VLM result dicts for associating chunks with original_chunk_id
 
         Returns:
             Tuple of:
@@ -114,6 +115,30 @@ class PreLLMInjector:
                 })
                 truncated = self._truncate_text(text, max_words=25)
                 logger.debug(f"Chunk[{i}] ID={chunk_id} ~{len(text.split())} words, content: {truncated}")
+
+            # Associate each chunk with original_chunk_id from VLM data
+            if batch_data:
+                for chunk in chunk_data:
+                    content = chunk["content"]
+                    original_chunk_id = None
+                    if "Time: " in content:
+                        time_start = content.find("Time: ") + 6
+                        time_end = content.find("\n", time_start)
+                        if time_end == -1:
+                            time_end = len(content)
+                        time_str = content[time_start:time_end].strip()
+                        # Find the VLM item with this time
+                        for item in batch_data:
+                            if item.get('time') == time_str:
+                                original_chunk_id = item.get('chunk_idx')
+                                break
+                    # If not found or no time, use the last item's chunk_idx as fallback
+                    if original_chunk_id is None:
+                        original_chunk_id = batch_data[-1].get('chunk_idx') if batch_data else None
+                    chunk["original_chunk_id"] = original_chunk_id
+            else:
+                for chunk in chunk_data:
+                    chunk["original_chunk_id"] = None
 
             if not chunks_text:
                 logger.warning("No chunks produced from content")

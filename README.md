@@ -103,7 +103,9 @@ Latest benchmark (subgraph-context in LLM injector): **26.67% accuracy** (8/30).
 Extract content from a video file first:
 
 ```bash
-python3 -m src.cli.main graph --config config/base_config.yaml --video path/to/video.mp4 --output output/graph_output.json
+# Extract VLM output (save chunks to a file) — put VLM output here:
+# `data/outputs/vlm_output_chunks.json`
+python3 -m src.cli.main graph --config config/base_config.yaml --vlm-output data/outputs/vlm_output_chunks.json
 ```
 
 ### 2. Start Neo4j Database
@@ -140,6 +142,56 @@ Construct a knowledge graph from the VLM output:
 
 ```bash
 python3 -m src.cli.main kg --config config/base_config.yaml --vlm-output output/vlm_output.json
+```
+ 
+### Batch retrieval (deep analysis)
+
+- **`--expected-chunk-json`**: pass a JSON file containing per-query expected chunk IDs to enable deep retrieval analysis (ranks, hits, per-query diagnostics).
+- **`--deep-analysis-dir`**: (Optional) directory where per-query deep-analysis JSON files will be written when `--expected-chunk-json` is provided. If omitted, deep-analysis files are written to `logs/deep_retrieval/<graph_uuid>/<timestamp>/`.
+
+#### Community-based Retrieval with Configurable Traversal Seeding
+
+When `community_retriever: true` is enabled in `config/base_config.yaml`, the system performs community-based retrieval: it ranks CommunitySummary nodes by similarity to the query, expands selected communities to their member chunks, and then performs graph traversal to discover related chunks.
+
+The traversal seed strategy is controlled by the `community_traversal_seed` flag in the config:
+- **`community_traversal_seed: chunk_node`** (default): Traversal is seeded from the community-derived chunk nodes. The system skips the intermediate entity collection step and instead expands the graph directly from chunks (chunk → entity → chunk paths).
+- **`community_traversal_seed: entity_node`**: Traversal is seeded from entities connected to the community chunks (legacy behavior). Entities are fetched first, then used as seeds for graph traversal.
+
+**Example configuration** (in `config/base_config.yaml`):
+```yaml
+community_high_graph:
+  community_creator: true
+  community_retriever: true
+  community_traversal_seed: chunk_node  # Use chunk nodes as traversal seeds
+```
+
+**What changes with chunk seeding**: With `chunk_node` seeding, the pipeline directly explores neighborhoods of community chunks through entity relationships, potentially finding related chunks that are semantically close to the community selection. With `entity_node` seeding, traversal starts from entities, which may discover different related chunks depending on entity connectivity.
+
+**Deep-analysis output**: The produced per-query deep-analysis JSON file includes:
+- `traversal_seed_type`: either `"chunk_node"` or `"entity_node"` depending on configuration.
+- `stages.community_search.seed_chunk_ids`: list of chunk IDs from community expansion that were used as traversal seeds.
+- `stages.community_search.seed_type`: the seed strategy for that query.
+- `stages.graph_traversal.chunk_ranks`: ranks of expected chunks discovered via traversal from the seeded chunks.
+
+Example (basic):
+```bash
+python3 -m src.cli.main batch-retrieve \
+  --config config/base_config.yaml \
+  --graph-uuid <graph-uuid> \
+  --input ./data/groundtruth/retrieval_offline.json \
+  --output results.json \
+  --expected-chunk-json ./data/groundtruth/retrieval_offline.json
+```
+
+Example (specify deep-analysis output directory):
+```bash
+python3 -m src.cli.main batch-retrieve \
+  --config config/base_config.yaml \
+  --graph-uuid <graph-uuid> \
+  --input ./data/groundtruth/retrieval_offline.json \
+  --output results.json \
+  --expected-chunk-json ./data/groundtruth/retrieval_offline_wrapper.json \
+  --deep-analysis-dir outputs/deep_analysis
 ```
 
 To include online retrieval during processing, specify a retrieval schedule:
@@ -283,6 +335,38 @@ python3 -m src.cli.main precompute --config config/base_config.yaml --graph-uuid
 - `ch3_l3`: Uses CH3-L3 (3-hop local clustering) for path-based traversal with cumulative scoring
 
 **Note**: If `hop_method` is set to `page_rank` or `ch3_l3`, you must run `precompute` before retrieval. The CLI will error if precomputation is missing.
+
+### 8. Retrieval Parameter Sweep
+
+Run automated parameter sweeps for retrieval optimization using a fixed graph with randomized retrieval parameters:
+
+```bash
+# Run retrieval sweep with fixed graph UUID
+python3 scripts/run_retrieval_sweep.py \
+  --graph-uuid 1e2d92c3-13fc-4264-a03b-735df7cd97c8 \
+  --epochs 20 \
+  --retrieval-json data/groundtruth/retrieval_offline.json \
+  --output-dir outputs/retrieval_sweeps
+```
+
+Key options:
+- `--graph-uuid`: Fixed graph UUID to use for all retrieval epochs (required)
+- `--epochs`: Number of retrieval + benchmark iterations (default: 10)
+- `--retrieval-json`: Path to ground truth retrieval JSON file
+- `--output-dir`: Directory to save sweep results and metrics
+- `--seed`: Random seed for reproducibility
+
+**Randomized Parameters**:
+- `top_k_chunks`: Randomly sampled from [5, 10, 15, 20, 25, 30]
+- `hop_method`: Randomly selected from ['naive', 'page_rank', 'ch3_l3']
+- `page_rank.alpha`: Randomly sampled from [0.1, 0.15, 0.2, 0.25, 0.3] (when hop_method='page_rank')
+- `page_rank.max_steps`: Randomly sampled from [50, 75, 100, 125, 150] (when hop_method='page_rank')
+- `ch3_l3.beam_width`: Randomly sampled from [5, 10, 15, 20] (when hop_method='ch3_l3')
+- `ch3_l3.max_hops`: Randomly sampled from [2, 3, 4] (when hop_method='ch3_l3')
+
+**Precomputation Validation**: The script automatically checks if required precomputation (PageRank/CH3-L3 scores) exists for the graph and errors if missing.
+
+**Output**: Results are saved in the same format as the full pipeline, with individual epoch metrics and a sweep summary.
 
 ## Pre-injection vs Injection
 
@@ -475,19 +559,45 @@ Run automated parameter sweeps with random sampling and comprehensive analysis:
 
 ### 1. Run Parameter Sweep
 
+**Standard mode** (KG build + 1 retrieval per epoch):
 ```bash
-# Run N epochs with random parameter combinations
 python3 scripts/run_parameter_sweep.py \
-  --epochs 50 \
-  --video-path /path/to/video.mp4 \
-  --retrieval-json data/groundtruth/retrieval_offline.json \
+  --epochs 15 \
+  --vlm-output data/outputs/vlm_output.json \
+  --retrieval-input data/groundtruth/retrieval_offline.json \
   --output-dir outputs/sweeps
 ```
 
+**All-retrieval mode** (KG build + 6 retrievals per epoch):
+```bash
+python3 scripts/run_parameter_sweep.py \
+  --epochs 15 \
+  --vlm-output data/outputs/vlm_output.json \
+  --retrieval-input data/groundtruth/retrieval_offline.json \
+  --output-dir outputs/sweeps \
+  --all-retrieval \
+  --comparable-all-retrieval \
+  --derive-hop-params
+```
+
+In `--all-retrieval` mode, each KG build is followed by 6 retrieval configurations:
+- **Community OFF**: naive, page_rank, ch3_l3 (3 runs)
+- **Community ON**: naive, page_rank, ch3_l3 (3 runs)
+
+By default, each retrieval run samples hop-specific parameters randomly. With `--comparable-all-retrieval`, shared baseline parameters (`retrieval.top_k`, `retrieval.graph_hops`) are sampled once per epoch and reused across all six runs; only hop-specific knobs vary. With `--derive-hop-params`, hop-specific values are derived from the baseline for fair comparison: `page_rank.top_k_hop_pagerank ≈ 2×top_k`, `ch3_l3.top_k_hop_ch3_l3 ≈ top_k`, `ch3_l3.max_path_length_ch3 ≈ graph_hops`. Each run is followed by benchmark evaluation.
+
 Key options:
-- `--epochs`: Number of KG build + benchmark iterations (default: 10)
-- `--clear-db`: Clear Neo4j database between epochs
+- `--epochs`: Number of KG build iterations (default: 15)
+- `--vlm-output`: Path to VLM output JSON file (default: data/outputs/vlm_output.json)
+- `--retrieval-input`: Path to retrieval groundtruth JSON file (default: data/groundtruth/retrieval_offline.json)
+- `--config`: Path to base configuration file (default: config/base_config.yaml)
+- `--output-dir`: Base directory for sweep outputs (default: outputs/sweeps)
+- `--all-retrieval`: Enable all-retrieval mode (6 retrievals per KG build instead of 1)
+- `--comparable-all-retrieval`: Share baseline retrieval params across runs for apples-to-apples comparison
+- `--derive-hop-params`: Derive hop-specific params from baseline (`top_k`, `graph_hops`) for consistency
+- `--dry-run`: Test without executing actual commands
 - `--seed`: Random seed for reproducibility
+- `--start-epoch`: Starting epoch number (default: 1)
 
 ### 2. Analyze Results
 

@@ -1,0 +1,105 @@
+video:
+  chunk_size_seconds: 5.0
+  frames_per_chunk: 5
+  fps_target: null
+vlm:
+  endpoint: http://localhost:8078/v1
+  api_key: ''
+  model_name: qwen-vlm
+  temperature: 0.2
+  top_p: 0.9
+  max_tokens: 2048
+  system_prompt: You are a helpful assistant that describes video content in detail.
+  user_prompt_template: Describe what's happening in these frames from a video.
+llm_injector:
+  endpoint: http://localhost:8078/v1
+  api_key: ''
+  model_name: qwen-vlm
+  temperature: 0.05
+  top_p: 0.9
+  max_tokens: 8192
+  subgraph_extraction_injection: true
+chunking:
+  enabled: true
+  chunk_size: 296
+  chunk_overlap: 16
+  max_triplets_per_chunk: 6
+  use_sentence_boundaries: true
+  parallel_count: 2
+  enable_global_refinement: true
+  refinement_max_tokens: 4000
+  global_triplet_limit: 15
+  max_new_triplets: 4
+  max_inter_chunk_relations: 10
+  max_merge_instructions: 14
+  max_prune_instructions: 19
+  chunk_timeout_seconds: 5.0
+  chunk_timeout_retries: 3
+  batch_llm_parallelism: false
+  max_connection_subgraph: 2
+kg:
+  batch_size: 3
+  verbose: true
+  embedding_endpoint: http://localhost:8071/v1
+  embedding_model: qwen-embedding
+  embedding_api_key: ''
+embedder:
+  endpoint: http://localhost:8071/v1
+  api_key: ''
+  model: qwen-embedding
+  top_k_chunk_with_batch_similarity: 3
+  top_k_similar_batch: 2
+neo4j:
+  uri: bolt://localhost:7687
+  user: neo4j
+  password: password
+  database: neo4j
+retrieval:
+  use_reranker: false
+  reranker_endpoint: http://localhost:8070/v1/rerank
+  reranker_api_key: ''
+  reranker_model: qwen-reranker
+  top_k: 20
+  top_k_chunks: 3
+  top_k_entities: 5
+  top_k_relationships: 5
+  graph_hops: 4
+  post_compression: true
+  compression_threshold: 0.15
+  verbose: false
+  entity_first: true
+  rerank_after_traversal: false
+  rerank_entities: true
+  rerank_relationships: true
+  hop_method: page_rank
+  top_k_hop_ch3_l3: 4
+  max_path_length_ch3: 4
+  cum_score_aggregation: product
+  top_k_hop_pagerank: 19
+benchmark_llm:
+  endpoint: http://localhost:8078/v1
+  api_key: ''
+  model_name: qwen-vlm
+  temperature: 0.2
+  top_p: 0.9
+  max_tokens: 2048
+community_high_graph:
+  community_creator: true
+  community_retriever: true
+  question_per_chunk: 4
+  frequency_incremental_leiden: 5
+  community_resolution: 1.661
+  debug_print_community: 3
+saving_batch_metrics: true
+pre_retrieval_computation:
+  auto_precompute_on_kg_build: false
+  pagerank:
+    alpha: 0.15
+    max_steps: 100
+    top_k_per_node: 50
+    min_score: 0.001
+  ch3_l3:
+    candidates_per_node: 200
+    min_ch3_score: 0.2
+    external_degree_approx: 2
+    batch_size: 50

@@ -66,7 +66,7 @@ async def run_offline_retrieval(config_path: str, graph_uuid: str, query: str, g
     logger.info(f"Retrieval result: {result}")
     return result
 
-async def run_batch_offline_retrieval(config_path: str, graph_uuid: str, input_file: str, output_file: str):
+async def run_batch_offline_retrieval(config_path: str, graph_uuid: str, input_file: str, output_file: str, expected_chunk_json: str = None, deep_analysis_dir: str = None):
     """Run batch offline retrieval from a JSON file"""
     from src.pipeline.retriever import OfflineRetriever
 
@@ -78,7 +78,7 @@ async def run_batch_offline_retrieval(config_path: str, graph_uuid: str, input_f
     logger.info(f"Output file: {output_file}")
 
     retriever = OfflineRetriever(config.retrieval, config.neo4j, config.kg, config.community_high_graph)
-    results = await retriever.batch_retrieve_from_file(input_file, graph_uuid)
+    results = await retriever.batch_retrieve_from_file(input_file, graph_uuid, expected_chunk_json, deep_analysis_dir)
 
     # Save results to output file
     output_path = Path(output_file)
@@ -260,6 +260,8 @@ def main():
     batch_retrieval_parser.add_argument('--graph-uuid', required=True, help='UUID of the knowledge graph to query')
     batch_retrieval_parser.add_argument('--input', required=True, help='Path to input JSON file with queries')
     batch_retrieval_parser.add_argument('--output', required=True, help='Path for output JSON file with results')
+    batch_retrieval_parser.add_argument('--expected-chunk-json', help='Path to expected chunk JSON to enable deep analysis logging')
+    batch_retrieval_parser.add_argument('--deep-analysis-dir', help='(Optional) Directory to write deep-analysis per-query JSON files. Requires --expected-chunk-json.')
 
     # Export command
     export_parser = subparsers.add_parser('export', help='Export a knowledge graph for collaboration')
@@ -328,8 +330,19 @@ def main():
         # Check if precomputation is required and exists
         if not asyncio.run(check_precomputation_for_retrieval(args.config, args.graph_uuid)):
             sys.exit(1)
-        
-        result = asyncio.run(run_batch_offline_retrieval(args.config, args.graph_uuid, args.input, args.output))
+        # Protect deep-analysis dir: only allowed if expected_chunk_json is provided
+        if getattr(args, 'deep_analysis_dir', None) and not getattr(args, 'expected_chunk_json', None):
+            logger.error("--deep-analysis-dir can only be used together with --expected-chunk-json")
+            sys.exit(1)
+
+        result = asyncio.run(run_batch_offline_retrieval(
+            args.config,
+            args.graph_uuid,
+            args.input,
+            args.output,
+            getattr(args, 'expected_chunk_json', None),
+            getattr(args, 'deep_analysis_dir', None)
+        ))
         print(f"Batch retrieval completed: {result}")
 
     elif args.command == 'export':
