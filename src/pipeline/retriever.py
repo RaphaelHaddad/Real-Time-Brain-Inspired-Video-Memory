@@ -7,6 +7,7 @@ from ..core.config import RetrievalConfig
 from ..components.neo4j_handler import Neo4jHandler
 from ..core.logger import get_logger
 from .retriever_hybrid import HybridRetriever, RerankerError
+from .edge_retriever import EdgeRetriever
 
 logger = get_logger(__name__)
 
@@ -22,6 +23,9 @@ class OnlineRetriever:
         self.output_file = Path("retrieval_results.json")
         # Initialize empty results file
         self.output_file.write_text("[]\n")
+        
+        # Initialize EdgeRetriever
+        self.edge_retriever = EdgeRetriever(config, neo4j_handler, schedule_path=None, realtime_output=False)
 
     def _write_result_realtime(self, result: Dict):
         """Write a single retrieval result to file in real-time"""
@@ -118,53 +122,7 @@ class OnlineRetriever:
         """Perform a retrieval query against the Neo4j database"""
         try:
             logger.debug(f"Starting retrieval for query: '{query}'")
-            
-            # This is a placeholder - in a real implementation, you'd perform
-            # actual graph queries based on the query string
-            async with self.neo4j_handler.driver.session() as session:
-                # Basic example: find entities related to the query
-                logger.debug(f"Executing fulltext search with query: '{query}'")
-                result = await session.run(
-                    """
-                    CALL db.index.fulltext.queryNodes("entityName", $search_query)
-                    YIELD node, score
-                    RETURN node.name AS name, node.graph_uuid AS graph_uuid, node.batch_time AS batch_time, score
-                    LIMIT $limit_count
-                    """,
-                    search_query=query,
-                    limit_count=self.config.top_k * 2
-                )
-
-                nodes = []
-                async for record in result:
-                    nodes.append({
-                        "name": record["name"],
-                        "graph_uuid": record["graph_uuid"],
-                        "batch_time": record["batch_time"] or "",
-                        "score": record["score"]
-                    })
-
-                logger.debug(f"Fulltext search returned {len(nodes)} raw nodes: {[n['name'] for n in nodes[:5]]}{'...' if len(nodes) > 5 else ''}")
-
-                # If reranker is configured, apply reranking
-                if self.config.use_reranker and self.config.reranker_endpoint and self.config.reranker_model:
-                    logger.debug("Applying reranking to results")
-                    nodes = await self._rerank_results_async(query, nodes)
-                    logger.debug(f"After reranking: {len(nodes)} nodes: {[n['name'] for n in nodes[:5]]}{'...' if len(nodes) > 5 else ''}")
-
-                # Limit to top_k results after potential reranking
-                nodes = nodes[:self.config.top_k]
-                logger.debug(f"After limiting to top_k ({self.config.top_k}): {len(nodes)} final nodes")
-
-                # Format results with time information
-                result_parts = []
-                for node in nodes:
-                    time_info = f" (time: {node['batch_time']})" if node['batch_time'] else ""
-                    result_parts.append(f"- {node['name']}{time_info} (score: {node['score']:.3f})")
-                
-                result_text = f"Found {len(nodes)} nodes related to query '{query[:50]}...':\n" + "\n".join(result_parts)
-                logger.debug(f"Final retrieval result: {result_text}")
-                return result_text
+            return await self.edge_retriever._perform_edge_retrieval(query)
 
         except Exception as e:
             logger.error(f"Error in retrieval: {str(e)}")
@@ -335,9 +293,10 @@ class OfflineRetriever:
             return []
 
     async def _perform_retrieval(self, query: str, true_chunks: List[int] = None) -> tuple[str, bool]:
-        """Perform a retrieval query using the hybrid search logic, with optional true_chunks tracking"""
-        hybrid = HybridRetriever(self.config, self.neo4j_handler, schedule_path=None, realtime_output=False)
-        return await hybrid._perform_hybrid_retrieval(query, true_chunks)
+        """Perform a retrieval query using the edge search logic, with optional true_chunks tracking"""
+        edge_retriever = EdgeRetriever(self.config, self.neo4j_handler, schedule_path=None, realtime_output=False)
+        result = await edge_retriever._perform_edge_retrieval(query)
+        return result, False
 
     async def _rerank_results(self, query: str, nodes: List[Dict]) -> List[Dict]:
         """Apply reranking to the retrieval results if a reranker is configured"""

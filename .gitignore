@@ -14,3 +14,5 @@ injection_run.log
 docker/plugins_new/apoc-5.26.16-core.jar
 data/export_graph/pruned
 outputs
+plugins/
+local_data/
