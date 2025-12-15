@@ -122,6 +122,7 @@ class EdgeRetriever:
         2. Expand to get relationships.
         3. Form edge sentences.
         4. Embed and rank edges against query.
+        5. Fetch associated chunks for top edges.
         """
         try:
             logger.debug(f"Starting edge retrieval for query: '{query}'")
@@ -142,51 +143,92 @@ class EdgeRetriever:
                 if not edges:
                     return f"No relationships found connected to entities for '{query}'"
 
-                # 4. Form Sentences and Embed
-                # Deduplicate edges based on ID
-                unique_edges = {e['id']: e for e in edges}.values()
-                
-                edge_sentences = []
-                edge_objects = []
-                
-                for edge in unique_edges:
-                    # Format: "NodeA RELATION_TYPE NodeB"
-                    rel_type_clean = edge['type'].replace('_', ' ')
-                    sentence = f"{edge['start']} {rel_type_clean} {edge['end']}"
-                    edge_sentences.append(sentence)
-                    edge_objects.append({
-                        **edge,
-                        "sentence": sentence
-                    })
-                
-                logger.debug(f"Embedding {len(edge_sentences)} edge sentences...")
-                # Batch embedding
-                edge_embeddings = await self.embedder.aembed_documents(edge_sentences)
-                
-                # 5. Calculate Similarity
-                scored_edges = []
-                for i, edge_emb in enumerate(edge_embeddings):
-                    score = self._cosine_similarity(query_embedding, edge_emb)
-                    scored_edges.append({
-                        **edge_objects[i],
-                        "score": score
-                    })
-                
-                # 6. Sort and Format
-                scored_edges.sort(key=lambda x: x['score'], reverse=True)
-                # Use top_k_relationships from config, default to 10 if not set
-                top_k = getattr(self.config, 'top_k_relationships', 10)
-                top_edges = scored_edges[:top_k]
-                
-                result_text = self._format_edge_results(query, top_edges)
-                
-                total_time = time.perf_counter() - retrieval_start
-                logger.debug(f"Total edge retrieval time: {total_time:.3f}s")
-                return result_text
+            # 4. Form Sentences and Embed
+            # Deduplicate edges based on ID
+            unique_edges = {e['id']: e for e in edges}.values()
+            
+            edge_sentences = []
+            edge_objects = []
+            
+            for edge in unique_edges:
+                # Format: "NodeA RELATION_TYPE NodeB"
+                rel_type_clean = edge['type'].replace('_', ' ')
+                sentence = f"{edge['start']} {rel_type_clean} {edge['end']}"
+                edge_sentences.append(sentence)
+                edge_objects.append({
+                    **edge,
+                    "sentence": sentence
+                })
+            
+            logger.debug(f"Embedding {len(edge_sentences)} edge sentences...")
+            # Batch embedding
+            edge_embeddings = await self.embedder.aembed_documents(edge_sentences)
+            
+            # 5. Calculate Similarity
+            scored_edges = []
+            for i, edge_emb in enumerate(edge_embeddings):
+                score = self._cosine_similarity(query_embedding, edge_emb)
+                scored_edges.append({
+                    **edge_objects[i],
+                    "score": score
+                })
+            
+            # 6. Sort and Format
+            scored_edges.sort(key=lambda x: x['score'], reverse=True)
+            # Use top_k_relationships from config, default to 10 if not set
+            top_k = getattr(self.config, 'top_k_relationships', 10)
+            top_edges = scored_edges[:top_k]
+            
+            # 7. Fetch associated chunks
+            chunks = []
+            if top_edges:
+                async with self.neo4j_handler.driver.session() as session:
+                    chunks = await self._fetch_chunks_for_edges(session, top_edges)
+            
+            result_text = self._format_edge_results(query, top_edges, chunks)
+            
+            total_time = time.perf_counter() - retrieval_start
+            logger.debug(f"Total edge retrieval time: {total_time:.3f}s")
+            return result_text
 
         except Exception as e:
             logger.error(f"Edge retrieval error: {str(e)}")
             return f"Edge retrieval failed: {str(e)}"
+
+    async def _fetch_chunks_for_edges(self, session, edges: List[Dict]) -> List[Dict]:
+        """Fetch text content for chunks linked to the provided edges."""
+        chunk_ids = set()
+        for edge in edges:
+            if edge.get('source_chunks'):
+                # source_chunks might be a list of strings/ints
+                for cid in edge['source_chunks']:
+                    chunk_ids.add(cid)
+        
+        if not chunk_ids:
+            return []
+
+        try:
+            result = await session.run(
+                """
+                MATCH (c:Chunk {graph_uuid: $graph_uuid})
+                WHERE c.id IN $chunk_ids
+                RETURN c.id as id, c.content as content, c.time as time
+                """,
+                graph_uuid=self.neo4j_handler.run_uuid,
+                chunk_ids=list(chunk_ids)
+            )
+            
+            chunks = []
+            async for record in result:
+                chunks.append({
+                    "id": record["id"],
+                    "content": record["content"],
+                    "time": record["time"]
+                })
+            return chunks
+        except Exception as e:
+            logger.warning(f"Failed to fetch chunks for edges: {e}")
+            return []
 
     async def _fulltext_search_entities(self, session, query: str) -> List[Dict[str, Any]]:
         """Fulltext search on entity names"""
@@ -262,13 +304,24 @@ class EdgeRetriever:
             return 0.0
         return dot_product / (mag1 * mag2)
 
-    def _format_edge_results(self, query: str, edges: List[Dict]) -> str:
-        if not edges:
-            return f"No relevant edges found for '{query}'"
+    def _format_edge_results(self, query: str, edges: List[Dict], chunks: List[Dict] = None) -> str:
+        parts = []
         
-        parts = [f"Top Edges for '{query}':"]
-        for i, edge in enumerate(edges, 1):
-            parts.append(f"{i}. {edge['sentence']} (score: {edge['score']:.3f})")
+        if edges:
+            parts.append(f"Top Edges for '{query}':")
+            for i, edge in enumerate(edges, 1):
+                parts.append(f"{i}. {edge['sentence']} (score: {edge['score']:.3f})")
+        
+        if chunks:
+            parts.append(f"\nRelevant Text Chunks ({len(chunks)}):")
+            # Sort chunks by time for better readability
+            chunks.sort(key=lambda x: x.get('time', ''))
+            for i, chunk in enumerate(chunks, 1):
+                time_info = f" [time: {chunk.get('time', '')}]" if chunk.get('time') else ""
+                parts.append(f"{i}. {chunk['content']}{time_info}")
+
+        if not parts:
+            return f"No relevant information found for '{query}'"
         
         return "\n".join(parts)
 
